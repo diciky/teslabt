@@ -1,0 +1,143 @@
+# TeslaBLE iOS .ipa 构建流水线（GitHub Actions）
+#
+# 说明：iOS 的 .ipa 只能在 macOS + Xcode 上编译并签名生成。
+# 这里直接使用 GitHub 官方托管的 macOS 构建机（macos-latest / macos-14），
+# 无需自建 Runner —— 这也是 GitHub 相对 CNB 当前环境的优势所在。
+#
+# 部署目标：IPHONEOS_DEPLOYMENT_TARGET = 15.0
+#   → 生成的 .ipa 支持 iOS 15.0 及以上，包含 iOS 16.6.1 及以下系统。
+#
+# 两种构建模式（通过仓库 Secrets 控制）：
+#   A. 无签名构建（默认，开箱即用）：不配置任何证书 Secrets，生成未签名 .ipa
+#      （可用于模拟器 / 后续自签名 / 越狱设备）。
+#   B. 真机签名构建（需要你在 Apple 开发者后台准备）：
+#      在 GitHub 仓库 Settings → Secrets and variables → Actions 配置：
+#        - APPLE_CERTIFICATE_P12        base64 编码的 .p12 发布证书
+#        - APPLE_CERTIFICATE_PASSWORD   证书密码
+#        - APPLE_PROVISIONING_PROFILE   base64 编码的 .mobileprovision 描述文件
+#        - DEVELOPMENT_TEAM            你的 Team ID（如 ABCD1234）
+#      配好后 workflow 会自动签名并导出可安装到真机的 .ipa。
+
+name: Build TeslaBLE IPA
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'TeslaBLE/**'
+      - '!TeslaBLE/README.md'
+  workflow_dispatch:     # 支持在 Actions 页面手动点击"Run workflow"触发
+
+jobs:
+  build-ipa:
+    name: Build TeslaBLE.ipa (iOS 15.0+)
+    runs-on: macos-14     # macOS 云构建机，预装 Xcode
+    defaults:
+      run:
+        working-directory: TeslaBLE
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i ios
+
+      - name: Import signing certificate (optional)
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -e
+          # 将 base64 证书导入系统钥匙串
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > /tmp/cert.p12
+          # 创建独立钥匙串避免污染系统钥匙串
+          security create-keychain -p temp build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p temp build.keychain
+          security import /tmp/cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/xcodebuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp build.keychain
+          security list-keychains -d user -s build.keychain
+
+      - name: Import provisioning profile (optional)
+        if: env.APPLE_PROVISIONING_PROFILE != ''
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          set -e
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$APPLE_PROVISIONING_PROFILE" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/TeslaBLE.mobileprovision
+          # 列出导入的描述文件 UUID
+          security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/TeslaBLE.mobileprovision | plutil -extract UUID raw -
+
+      - name: Set signing team (optional)
+        if: env.DEVELOPMENT_TEAM != ''
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          set -e
+          # 将 Team ID 写入工程
+          sed -i '' "s/DEVELOPMENT_TEAM = \"\";/DEVELOPMENT_TEAM = \"$DEVELOPMENT_TEAM\";/g" TeslaBLE.xcodeproj/project.pbxproj
+          grep -n "DEVELOPMENT_TEAM" TeslaBLE.xcodeproj/project.pbxproj
+
+      - name: Build archive
+        run: |
+          set -e
+          xcodebuild \
+            -project TeslaBLE.xcodeproj \
+            -scheme TeslaBLE \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$RUNNER_TEMP/TeslaBLE.xcarchive" \
+            -allowProvisioningUpdates \
+            CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" \
+            archive
+
+      - name: Export IPA
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          set -e
+          # 根据是否配置了 Team ID 生成对应的导出参数
+          if [ -n "$DEVELOPMENT_TEAM" ]; then
+            METHOD=development
+            SIGNING=automatic
+          else
+            # 无证书时导出为未签名 ipa
+            METHOD=development
+            SIGNING=manual
+          fi
+          cat > /tmp/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${METHOD}</string>
+            <key>signingStyle</key>
+            <string>${SIGNING}</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>compileBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$RUNNER_TEMP/TeslaBLE.xcarchive" \
+            -exportOptionsPlist /tmp/ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export"
+          echo "=== 构建产物 ==="
+          ls -lh "$RUNNER_TEMP/export"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeslaBLE-ipa
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
