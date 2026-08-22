@@ -1,0 +1,50 @@
+# TeslaBLE iOS .ipa 构建流水线
+#
+# 说明：iOS .ipa 只能在 macOS + Xcode 上编译并签名生成。
+# 本流水线通过 CNB「自托管 Runner」调度到你的 macOS 构建机（Apple Silicon / Intel 均可）执行。
+# 使用前请先在 CNB 根组织接入一台 macOS 自托管节点，并为其配置标签（如 mac、arm64、xcode）。
+#
+# 部署目标：IPHONEOS_DEPLOYMENT_TARGET = 15.0
+#   → 生成的 .ipa 支持 iOS 15.0 及以上，包含 iOS 16.6.1 及以下版本。
+main:
+  push:
+    - name: build-ipa
+      runner:
+        namespace: group
+        tags:
+          - mac
+          - arm64
+          - xcode
+      stages:
+        - name: install-deps
+          script: |
+            set -e
+            # 检查 Xcode 环境（自托管节点需预装 Xcode + 已配置签名证书/描述文件）
+            xcodebuild -version
+        - name: archive
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/TeslaBLE"
+            xcodebuild \
+              -project TeslaBLE.xcodeproj \
+              -scheme TeslaBLE \
+              -configuration Release \
+              -sdk iphoneos \
+              -archivePath "$CNB_BUILD_WORKSPACE/build/TeslaBLE.xcarchive" \
+              -allowProvisioningUpdates \
+              archive
+        - name: export-ipa
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/TeslaBLE"
+            xcodebuild \
+              -exportArchive \
+              -archivePath "$CNB_BUILD_WORKSPACE/build/TeslaBLE.xcarchive" \
+              -exportOptionsPlist ExportOptions.plist \
+              -exportPath "$CNB_BUILD_WORKSPACE/build/export"
+            echo "=== 构建产物 ==="
+            ls -lh "$CNB_BUILD_WORKSPACE/build/export"
+        - name: report
+          script: |
+            echo "IPA 已生成：$CNB_BUILD_WORKSPACE/build/export/TeslaBLE.ipa"
+            echo "部署目标 iOS 15.0，支持 iOS 16.6.1 及以下系统"

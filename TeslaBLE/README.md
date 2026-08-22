@@ -10,7 +10,7 @@
 - 📊 **实时显示**：车速、电量、里程、温度等遥测数据的实时展示
 - ⚡ **传输统计**：平均/最近延迟、吞吐率、收发包数、丢包率
 - 🎯 **低延迟模式开关**：可切换不同收发策略
-- 📱 **SwiftUI + CoreBluetooth + CryptoKit**，原生实现，运行于 iOS 15+
+- 📱 **SwiftUI + CoreBluetooth + CryptoKit**，原生实现，运行于 iOS 15+（含 iOS 16.6.1 及以下版本）
 
 ## 技术架构
 
@@ -71,10 +71,18 @@
 3. 若未认证，点击 **开始配对**，在车辆中控屏确认
 4. 认证后即可使用锁车/解锁/鸣笛/闪灯等控制功能
 
+### 系统兼容性
+
+工程 `IPHONEOS_DEPLOYMENT_TARGET = 15.0`，即生成的 `.ipa` **支持 iOS 15.0 及以上全部版本**（包含 iOS 16.6.1 及以下版本）。代码未使用任何 iOS 17+ 独占 API，可放心在 iOS 16.6.1 设备上安装运行。
+
 ### 构建 .ipa
 
+iOS 的 `.ipa` 只能在 **macOS + Xcode** 上编译并签名，支持两种方式：
+
+**方式一：本机 macOS 手动构建**
+
 ```bash
-# 在 macOS 上
+# 在 macOS 上（需已配置 Apple 签名证书与描述文件）
 xcodebuild -project TeslaBLE.xcodeproj \
   -scheme TeslaBLE \
   -configuration Release \
@@ -86,8 +94,16 @@ xcodebuild -exportArchive \
   -exportOptionsPlist ExportOptions.plist \
   -exportPath build/export
 
-# 产物位于 build/export/*.ipa
+# 产物位于 build/export/TeslaBLE.ipa
 ```
+
+**方式二：CNB 云原生构建（自托管 macOS Runner）**
+
+仓库已内置 `.cnb.yml` 流水线，接入一台 macOS 自托管节点后，`push` 到 `main` 即可自动生成 `.ipa`：
+
+- 自托管节点标签需包含 `mac`、`arm64`（Apple Silicon）或 `xcode`
+- 节点需预装 Xcode，并配置好开发签名证书/描述文件
+- 流水线执行 `xcodebuild archive` + `-exportArchive`，产物位于构建工作区 `build/export/TeslaBLE.ipa`
 
 ### 安装
 
