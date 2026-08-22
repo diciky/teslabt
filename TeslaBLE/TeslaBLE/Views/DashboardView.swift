@@ -5,6 +5,7 @@ struct DashboardView: View {
     @StateObject private var viewModel = DashboardViewModel()
     @State private var showWhitelistAlert = false
     @State private var showResetKeysAlert = false
+    @State private var vinInput: String = ""
 
     var body: some View {
         NavigationView {
@@ -52,6 +53,22 @@ struct DashboardView: View {
                     Button("断开") { viewModel.stop() }
                         .buttonStyle(.bordered)
                 }
+            }
+
+            // VIN 输入（用于命令个性化签名）
+            HStack {
+                TextField("车辆 VIN（个性化签名必需）", text: $vinInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .autocapitalization(.allCharacters)
+                    .onSubmit {
+                        viewModel.setVIN(vinInput.uppercased())
+                    }
+                Button("保存") {
+                    viewModel.setVIN(vinInput.uppercased())
+                    vinInput = ""
+                }
+                .font(.caption)
             }
 
             if viewModel.isAuthenticated {

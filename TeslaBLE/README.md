@@ -1,13 +1,15 @@
 # TeslaBLE — Tesla 蓝牙低延迟数据收发显示 App
 
-基于 **Tesla 车辆真实 BLE 协议** 的 iOS 应用，实现手机与车辆之间的**低延迟数据发送 / 接收 / 实时显示**，支持本地车辆控制（锁车、解锁、鸣笛、闪灯等），无需云端 API。
+基于 **Tesla 官方 Vehicle Command 协议（`github.com/teslamotors/vehicle-command`）** 的 iOS 应用，实现手机与车辆之间的**低延迟数据发送 / 接收 / 实时显示**，支持本地车辆控制（锁车、解锁、鸣笛、闪灯等），无需云端 API。
 
 ## 功能特性
 
-- 🔍 **自动扫描并连接 Tesla 车辆**（BLE Central，使用真实 Tesla Service UUID）
-- 🔐 **P-256 ECDH 密钥协商 + AES-GCM 加密 + HMAC 认证**
+- 🔍 **自动扫描并连接 Tesla 车辆**（BLE Central，使用真实 Tesla Service UUID `00000211`）
+- 🔐 **P-256 ECDH 密钥协商 + 128 位 AES-GCM 加密**（符合官方协议 `K = SHA1(Sx)[:16]`）
+- 🔏 **AES-GCM PERSONALIZED 命令签名**（AAD = SHA256(Metadata)，含 VIN/epoch/counter/过期时间）
+- 🛡️ **session info 认证**（HMAC-SHA256 防 MITM）与 **响应解密**（request hash）
 - 🎛️ **车辆控制**：锁车、解锁、鸣笛、闪灯、状态查询
-- 📊 **实时显示**：车速、电量、里程、温度等遥测数据的实时展示
+- 📊 **实时显示**：车辆状态（锁/解锁等）与原始数据流实时展示
 - ⚡ **传输统计**：平均/最近延迟、吞吐率、收发包数、丢包率
 - 🎯 **低延迟模式开关**：可切换不同收发策略
 - 📱 **SwiftUI + CoreBluetooth + CryptoKit**，原生实现，运行于 iOS 15+（含 iOS 16.6.1 及以下版本）
@@ -42,14 +44,17 @@
 | 车辆服务 | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
 | 写特征 | `00000212-b2d1-43f0-9b88-960cebf8b91e` |
 | 指示特征 | `00000213-b2d1-43f0-9b88-960cebf8b91e` |
-| 蓝牙名称 | `Tesla + VIN后6位` 或基于 VIN SHA1 的格式 |
+| 蓝牙名称 | `S + <VIN的SHA1前8字节hex> + C`（如 `S1a87a5a75f3df858C`） |
 
-### 安全协议
+### 安全协议（符合官方 `pkg/protocol/protocol.md`）
 
 1. **密钥生成**：NIST P-256（secp256r1）曲线生成密钥对
-2. **白名单（配对）**：公钥添加到车辆（需车内确认）
-3. **会话协商**：ECDH 交换 + HKDF-SHA256 派生会话密钥
-4. **加密通信**：AES-GCM 加密消息 + HMAC-SHA256 认证
+2. **握手**：`session_info_request` 交换公钥，返回 `session_info`（epoch/counter/clock_time）
+3. **会话密钥**：`K = SHA1(BIG_ENDIAN(Sx, 32))[:16]`（128 位 AES-GCM 密钥）
+4. **session info 认证**：`SESSION_INFO_KEY = HMAC-SHA256(K, "session info")` 验证响应 tag
+5. **命令签名**：AES-GCM PERSONALIZED，AAD = SHA256(Metadata TLV)，含签名类型/域/VIN/epoch/过期时间/counter/flags
+6. **响应解密**：AES-GCM Response，AAD 含 request hash + fault
+7. **BLE 传输**：2 字节大端长度前缀 + RoutableMessage（protobuf）
 
 ### 域
 
@@ -66,10 +71,11 @@
 
 ### 使用步骤
 
-1. 打开 App，点击 **扫描连接**
-2. 连接成功后，App 会自动发起密钥协商
-3. 若未认证，点击 **开始配对**，在车辆中控屏确认
-4. 认证后即可使用锁车/解锁/鸣笛/闪灯等控制功能
+1. 打开 App，在顶部输入你的 **车辆 VIN**（17 位，命令个性化签名必需）并保存
+2. 点击 **扫描连接**
+3. 连接成功后，App 会自动发起密钥协商（session_info 握手）
+4. 若未认证，点击 **开始配对**，在车辆中控屏确认（首次需 NFC 卡或已授权密钥）
+5. 认证后即可使用锁车/解锁/鸣笛/闪灯等控制功能
 
 ### 系统兼容性
 

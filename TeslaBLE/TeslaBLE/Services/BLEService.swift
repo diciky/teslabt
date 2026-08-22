@@ -38,9 +38,22 @@ final class BLEService: NSObject, ObservableObject {
     private var sessionKeys: TeslaBLESessionCrypto.SessionKeys?
     private var vehiclePublicKey: Data?
 
+    /// 车辆 VIN（用于命令个性化签名）
+    /// 通过扫描到的蓝牙名称 `S+ID+C` 提取，或由用户手动设置
+    var vin: String = ""
+
+    /// 握手请求的 uuid（用于 session info 认证 challenge）
+    private var handshakeUUID: Data?
+    /// 最近一次发送命令的 requestHash（用于响应解密）
+    private var pendingRequestHash: Data?
+    /// 最近一次发送命令的 domain
+    private var pendingDomain: TeslaMetadataSerializer.Domain?
+
+    /// BLE 传输层：接收缓冲区（累积 2 字节长度前缀 + 消息体）
+    private var receiveBuffer = Data()
+
     // 消息序号
     private var messageCounter: UInt32 = 0
-    private var sequenceCounter: UInt16 = 0
 
     /// 已发送但尚未 ACK 的序列号集合
     private var pendingAcks: Set<UInt16> = []
@@ -127,36 +140,35 @@ final class BLEService: NSObject, ObservableObject {
         sendSignedMessage(TeslaProtocol.buildVehicleStatusRequest())
     }
 
-    /// 发送自定义数据（用于低延迟收发测试）
+    /// 发送自定义数据（通过签名 RoutableMessage 发送）
     func sendCustomData(_ payload: [UInt8]) {
         guard isAuthenticated else {
             state = .error("未认证，请先完成白名单")
             return
         }
-        send(command: .control, payload: payload)
+        sendSignedMessage(Data(payload))
     }
 
-    /// 发送遥测数据（测试用）
+    /// 发送遥测数据（测试用，通过签名消息封装）
     func sendTelemetry(channel: UInt8, value: Double) {
-        send(command: .telemetry, payload: TeslaProtocol.telemetryPayload(value: value, channel: channel))
+        guard isAuthenticated else { return }
+        let payload = Data(TeslaProtocol.telemetryPayload(value: value, channel: channel))
+        sendSignedMessage(payload)
     }
 
-    /// 触发白名单操作（需在车内中控屏确认）
+    /// 触发白名单操作（需在车内中控屏/NFC 确认）
+    /// 官方流程：需由已在车辆上的授权密钥（Service 或 Owner）签名该操作，首次配对需配合 NFC 卡。
     func startWhitelist() {
-        guard let privateKey = localPrivateKey, let peripheral = connectedPeripheral,
-              let writeChar = writeCharacteristic else {
-            state = .error("无法开始白名单")
+        guard isAuthenticated, let privateKey = localPrivateKey else {
+            state = .error("白名单需要先建立加密会话（需已有一个授权密钥）")
             return
         }
 
-        // 发送公钥给车辆进行白名单
         let publicKeyData = privateKey.publicKey.rawRepresentation
-
-        // VCSEC WhitelistOperation message
-        // 简化实现：将公钥直接发送给车辆
-        let message = Data(publicKeyData)
-        peripheral.writeValue(message, for: writeChar, type: .withResponse)
-        state = .error("请在车辆中控屏确认配对")
+        // VCSEC WhitelistOperation: addPublicKeyToWhitelist
+        let message = TeslaProtocol.buildWhitelistAddKey(publicKey: publicKeyData)
+        sendSignedMessage(message)
+        state = .error("请在车辆中控屏确认配对（需 NFC 卡或已授权密钥）")
     }
 
     /// 重置密钥
@@ -171,66 +183,55 @@ final class BLEService: NSObject, ObservableObject {
         localPrivateKey = TeslaBLEKeyManager.getOrCreateKeyPair()
     }
 
-    private func nextSequence() -> UInt16 {
-        sequenceCounter = sequenceCounter &+ 1
-        return sequenceCounter
-    }
-
-    /// 发送签名命令（加密）
-    private func sendSignedMessage(_ message: Data) {
-        guard isAuthenticated, let keys = sessionKeys else {
+    /// 发送签名命令（符合官方 AES-GCM PERSONALIZED）
+    private func sendSignedMessage(_ message: Data, domain: TeslaMetadataSerializer.Domain = .vehicleSecurity) {
+        guard isAuthenticated, let keys = sessionKeys, let localPrivateKey = localPrivateKey else {
             state = .error("未认证，无法发送签名命令")
             return
         }
-
-        // 加密消息
-        guard let encrypted = TeslaBLESessionCrypto.encrypt(message, with: keys.sessionKey) else {
-            state = .error("加密失败")
+        guard !vin.isEmpty else {
+            state = .error("缺少车辆 VIN，无法个性化签名")
             return
         }
 
-        // 添加 HMAC 认证
-        let mac = TeslaBLESessionCrypto.hmac(encrypted, key: keys.macKey)
+        // 客户端公钥 SEC1 编码（04||x||y）
+        let clientPublicKey = localPrivateKey.publicKey.rawRepresentation
 
-        // 构建完整消息：encrypted + mac
-        var fullMessage = Data()
-        fullMessage.append(encrypted)
-        fullMessage.append(mac)
+        guard let signed = TeslaProtocol.buildSignedRoutableMessage(
+            payload: message,
+            domain: domain,
+            vin: vin,
+            session: keys,
+            clientPublicKey: clientPublicKey
+        ) else {
+            state = .error("命令签名失败")
+            return
+        }
 
-        // 通过帧封装发送
-        let payload = [UInt8](fullMessage)
-        send(command: .control, payload: payload)
+        // 更新会话 counter（每次命令递增）
+        sessionKeys?.counter = signed.counter
+        // 记录用于响应解密
+        pendingRequestHash = signed.requestHash
+        pendingDomain = domain
+
+        // 通过 BLE 传输：2 字节大端长度前缀 + RoutableMessage
+        writeRoutableMessage(signed.message)
     }
 
-    /// 发送一帧数据
-    func send(command: TeslaProtocol.CommandType, payload: [UInt8]) {
+    /// 通过 BLE 写特征发送 RoutableMessage（官方格式：2 字节大端长度前缀 + 消息体）
+    private func writeRoutableMessage(_ message: Data) {
         guard let peripheral = connectedPeripheral,
-              let characteristic = writeCharacteristic,
-              state.isConnected else {
-            return
-        }
+              let characteristic = writeCharacteristic else { return }
 
-        let sequence = nextSequence()
-        let data = TeslaProtocol.encodeFrame(type: command, sequence: sequence, payload: payload)
+        var framed = Data()
+        // 2 字节大端长度前缀
+        framed.append(UInt8((message.count >> 8) & 0xFF))
+        framed.append(UInt8(message.count & 0xFF))
+        framed.append(message)
 
-        if data.count <= maxPayloadBytes {
-            sendFrame(data, sequence: sequence, to: peripheral, characteristic: characteristic)
-        } else {
-            splitAndSend(data, sequence: sequence, to: peripheral, characteristic: characteristic)
-        }
-    }
-
-    private func sendFrame(_ data: Data, sequence: UInt16, to peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        pendingAcks.insert(sequence)
-        sendTimestamps[sequence] = Date()
-        stats.packetsSent += 1
-        stats.totalBytesSent += data.count
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-    }
-
-    private func splitAndSend(_ data: Data, sequence: UInt16, to peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        // 分块发送（每次 write with response）
+        let bytes = [UInt8](framed)
         var offset = 0
-        let bytes = [UInt8](data)
         while offset < bytes.count {
             let end = min(offset + maxPayloadBytes, bytes.count)
             let chunk = Data(bytes[offset..<end])
@@ -239,95 +240,153 @@ final class BLEService: NSObject, ObservableObject {
             stats.totalBytesSent += chunk.count
             peripheral.writeValue(chunk, for: characteristic, type: .withResponse)
         }
-        pendingAcks.insert(sequence)
-        sendTimestamps[sequence] = Date()
+        // 记录发送时间用于延迟统计
+        stats.lastLatencyMs = 0
     }
 
+    /// 处理收到的 BLE 数据（累积 2 字节长度前缀的完整消息后解析）
     private func handleReceivedFrame(_ data: Data) {
         frameSubject.send(data)
         stats.packetsReceived += 1
         stats.totalBytesReceived += data.count
 
-        // 尝试解析传输层帧
-        guard let frame = TeslaProtocol.decodeFrame(data) else {
-            // 可能是原始 BLE 消息（非帧封装），直接处理
-            handleRawMessage(data)
-            return
-        }
+        // 累积到接收缓冲区
+        receiveBuffer.append(data)
 
-        switch frame.type {
-        case .ack, .pong, .statusResponse, .telemetryResponse, .controlResponse:
-            handleAck(sequence: frame.sequence, timestamp: Date())
-            handleRawMessage(Data(frame.payload))
-        case .telemetry:
-            // 解析遥测数据
-            if frame.payload.count >= 1 {
-                let channel = frame.payload[0]
-                let value = TeslaProtocol.parseDouble(from: frame.payload)
-                let sample = TelemetrySample(channel: "ch\(channel)",
-                                             rawPayload: frame.payload.map { String(format: "%02X", $0) }.joined(),
-                                             value: value,
-                                             unit: unit(for: channel))
-                DispatchQueue.main.async { [weak self] in
-                    self?.receivedSamples.append(sample)
-                    if let count = self?.receivedSamples.count, count > 200 {
-                        self?.receivedSamples.removeFirst(count - 200)
-                    }
-                }
-            }
-        default:
-            break
+        // 循环解析可能的多条完整消息
+        while receiveBuffer.count >= 2 {
+            let bytes = [UInt8](receiveBuffer)
+            let msgLength = (Int(bytes[0]) << 8) | Int(bytes[1])
+            guard receiveBuffer.count >= 2 + msgLength else { break }
+
+            // 提取一条完整 RoutableMessage
+            let msg = receiveBuffer.subdata(in: receiveBuffer.startIndex..<receiveBuffer.startIndex + 2 + msgLength)
+            let body = msg.dropFirst(2)
+            receiveBuffer.removeFirst(2 + msgLength)
+
+            handleRoutableMessage(Data(body))
         }
     }
 
-    /// 处理未封装帧的原始消息（密钥协商、白名单等）
-    private func handleRawMessage(_ data: Data) {
-        // 检查是否为车辆公钥响应
-        let bytes = [UInt8](data)
-        if bytes.count == 65 && (bytes[0] == 0x04 || bytes[0] == 0x02 || bytes[0] == 0x03) {
-            // SEC1 编码的公钥
-            vehiclePublicKey = data
-            handleVehiclePublicKeyReceived()
+    /// 处理一条 RoutableMessage（握手响应 / 命令响应）
+    private func handleRoutableMessage(_ data: Data) {
+        let fields = TeslaProtobuf.decodeFields(data)
+
+        // 1) 握手响应：包含 session_info (field15)
+        if TeslaProtobuf.getBytes(fields, field: 15) != nil {
+            handleSessionInfoResponse(data)
             return
         }
 
-        // 如果是加密数据，尝试解密
-        if isAuthenticated, let keys = sessionKeys, data.count > 28 {
-            // 分离 MAC (后 32 字节) 和加密数据
-            let macData = data.suffix(32)
-            let encryptedData = data.prefix(data.count - 32)
-
-            // 验证 HMAC
-            let expectedMAC = TeslaBLESessionCrypto.hmac(encryptedData, key: keys.macKey)
-            if macData == expectedMAC {
-                if let decrypted = TeslaBLESessionCrypto.decrypt(encryptedData, with: keys.sessionKey) {
-                    parseVehicleResponse(decrypted)
-                }
-            }
+        // 2) 命令响应：加密负载 (field10) + AES_GCM_Response_data
+        guard let keys = sessionKeys else {
+            parseVehicleResponse(data)
+            return
         }
+        parseEncryptedResponse(data, keys: keys)
     }
 
-    /// 处理车辆公钥接收
-    private func handleVehiclePublicKeyReceived() {
-        guard let localPrivateKey = localPrivateKey,
-              let vehiclePublicKey = vehiclePublicKey else { return }
+    /// 处理握手（session info）响应
+    private func handleSessionInfoResponse(_ data: Data) {
+        guard let parsed = TeslaProtocol.parseSessionInfoResponse(data) else {
+            state = .error("解析会话信息失败")
+            return
+        }
 
-        // 派生会话密钥
-        sessionKeys = TeslaBLESessionCrypto.deriveSessionKeys(
+        // 派生共享密钥 K = SHA1(Sx)[:16]
+        guard let localPrivateKey = localPrivateKey else { return }
+        guard let key = TeslaBLESessionCrypto.deriveSessionKey(
             localPrivateKey: localPrivateKey,
-            vehiclePublicKeyRaw: vehiclePublicKey
+            vehiclePublicKeyRaw: parsed.vehiclePublicKey
+        ) else {
+            state = .error("密钥派生失败")
+            return
+        }
+
+        // 验证 session info tag（防 MITM）
+        guard let handshakeUUID = handshakeUUID else { return }
+        let sessionInfoKey = TeslaBLESessionCrypto.sessionInfoKey(from: key)
+        let metadata = TeslaMetadataSerializer.sessionInfoMetadata(vin: vin, challenge: handshakeUUID)
+        let expectedTag = TeslaBLESessionCrypto.hmac(metadata + parsedSessionInfoBytes(from: data), key: sessionInfoKey)
+
+        guard TeslaBLESessionCrypto.constantTimeEquals(expectedTag, parsed.sessionInfoTag) else {
+            state = .error("会话信息认证失败（MITM 风险）")
+            return
+        }
+
+        // 建立会话
+        sessionKeys = TeslaBLESessionCrypto.SessionKeys(
+            sessionKey: key,
+            epoch: parsed.epoch,
+            counter: parsed.counter,
+            clockTime: parsed.clockTime,
+            clockOffset: Double(Date().timeIntervalSince1970) - Double(parsed.clockTime)
         )
 
-        if sessionKeys != nil {
-            isAuthenticated = true
-            sessionStage = .authenticated
-            state = .connected
-            // 请求车辆状态
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.requestVehicleStatus()
-            }
-        } else {
-            state = .error("密钥协商失败")
+        isAuthenticated = true
+        sessionStage = .authenticated
+        state = .connected
+
+        // 认证成功后请求车辆状态
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.requestVehicleStatus()
+        }
+    }
+
+    /// 从 session info 响应中提取原始 session_info 字节（field15），用于 HMAC 认证
+    private func parsedSessionInfoBytes(from data: Data) -> Data {
+        let fields = TeslaProtobuf.decodeFields(data)
+        return TeslaProtobuf.getBytes(fields, field: 15) ?? Data()
+    }
+
+    /// 解析加密的命令响应（AES-GCM Response 解密）
+    private func parseEncryptedResponse(_ data: Data, keys: TeslaBLESessionCrypto.SessionKeys) {
+        let fields = TeslaProtobuf.decodeFields(data)
+
+        // 提取 payload (field10)
+        guard let payload = TeslaProtobuf.getBytes(fields, field: 10) else {
+            // 无负载，仅状态
+            handleAck(sequence: 0, timestamp: Date())
+            return
+        }
+
+        // 提取 signature_data (field13) → AES_GCM_Response_data (field9)
+        guard let sigData = TeslaProtobuf.getBytes(fields, field: 13),
+              let aesResp = TeslaProtobuf.getBytes(TeslaProtobuf.decodeFields(sigData), field: 9) else {
+            // 旧固件可能返回明文
+            parseVehicleResponse(payload)
+            return
+        }
+
+        let aesFields = TeslaProtobuf.decodeFields(aesResp)
+        guard let nonce = TeslaProtobuf.getBytes(aesFields, field: 1),
+              let tag = TeslaProtobuf.getBytes(aesFields, field: 3) else {
+            return
+        }
+        let counter = UInt32(TeslaProtobuf.getVarint(aesFields, field: 2) ?? 0)
+        let flags = UInt32(TeslaProtobuf.getVarint(fields, field: 52) ?? 0)
+
+        // 构建响应解密 Metadata
+        guard let pendingRequestHash = pendingRequestHash else { return }
+        let responseMetadata = TeslaMetadataSerializer.responseMetadata(
+            domain: pendingDomain ?? .vehicleSecurity,
+            vin: vin,
+            counter: counter,
+            flags: flags,
+            requestHash: pendingRequestHash
+        )
+        let aad = Data(SHA256.hash(data: responseMetadata))
+
+        // 分离密文与 tag
+        let combined = payload + tag
+        if let plaintext = TeslaBLESessionCrypto.open(
+            combined,
+            key: keys.sessionKey,
+            nonce: nonce,
+            aad: aad
+        ) {
+            handleAck(sequence: 0, timestamp: Date())
+            parseVehicleResponse(plaintext)
         }
     }
 
@@ -335,30 +394,44 @@ final class BLEService: NSObject, ObservableObject {
     private func parseVehicleResponse(_ data: Data) {
         let fields = TeslaProtobuf.decodeFields(data)
 
-        // 尝试解析车辆状态
-        if TeslaProtobuf.getVarint(fields, field: 1) != nil {
-            // 更新状态
+        // VCSEC FromVCSECMessage: vehicleStatus (field1) 内含锁状态
+        if let vehicleStatusData = TeslaProtobuf.getBytes(fields, field: 1) {
+            let vsFields = TeslaProtobuf.decodeFields(vehicleStatusData)
+            // VehicleStatus.vehicleLockState (field2): UNLOCKED=0, LOCKED=1
+            let lockState = UInt32(TeslaProtobuf.getVarint(vsFields, field: 2) ?? 0)
+            let locked = (lockState == 1 || lockState == 2) // LOCKED / INTERNAL_LOCKED
+
             DispatchQueue.main.async { [weak self] in
-                self?.vehicleState = TeslaProtocol.TeslaVehicleState(
-                    batteryLevel: Int(TeslaProtobuf.getVarint(fields, field: 2) ?? 0),
-                    locked: (TeslaProtobuf.getVarint(fields, field: 3) ?? 0) == 1,
-                    chargePortOpen: (TeslaProtobuf.getVarint(fields, field: 4) ?? 0) == 1,
-                    charging: (TeslaProtobuf.getVarint(fields, field: 5) ?? 0) == 1,
-                    climateOn: (TeslaProtobuf.getVarint(fields, field: 6) ?? 0) == 1,
-                    sentryMode: (TeslaProtobuf.getVarint(fields, field: 7) ?? 0) == 1
+                guard let self = self else { return }
+                var state = self.vehicleState
+                state.locked = locked
+                self.vehicleState = state
+                // 记录原始响应样本
+                let sample = TelemetrySample(
+                    channel: "vehicleStatus",
+                    rawPayload: vehicleStatusData.map { String(format: "%02X", $0) }.joined(),
+                    value: Double(lockState),
+                    unit: ""
                 )
+                self.receivedSamples.append(sample)
+                if self.receivedSamples.count > 200 {
+                    self.receivedSamples.removeFirst(self.receivedSamples.count - 200)
+                }
             }
         }
 
-        // 创建样本记录
-        let sample = TelemetrySample(
-            channel: "vehicle",
-            rawPayload: data.map { String(format: "%02X", $0) }.joined(),
-            value: Double(fields.count),
-            unit: ""
-        )
+        // 记录原始响应
         DispatchQueue.main.async { [weak self] in
+            let sample = TelemetrySample(
+                channel: "raw",
+                rawPayload: data.map { String(format: "%02X", $0) }.joined(),
+                value: Double(fields.count),
+                unit: ""
+            )
             self?.receivedSamples.append(sample)
+            if let count = self?.receivedSamples.count, count > 200 {
+                self?.receivedSamples.removeFirst(count - 200)
+            }
         }
     }
 
@@ -415,6 +488,10 @@ extension BLEService: CBCentralManagerDelegate {
         // 过滤 Tesla 设备：名称包含 "Tesla" 或广播中包含 Tesla 服务
         if let name = peripheral.name {
             if name.contains("Tesla") || name.contains("S") {
+                // 记录车辆广播 ID（S+ID+C 中的 ID，为 VIN 的 SHA1 前 8 字节 hex）
+                if let vehicleID = TeslaProtocol.vehicleID(fromLocalName: name) {
+                    print("Tesla vehicle ID: \(vehicleID)")
+                }
                 connect(to: peripheral)
             }
         } else {
@@ -440,6 +517,10 @@ extension BLEService: CBCentralManagerDelegate {
         indicateCharacteristic = nil
         isAuthenticated = false
         sessionKeys = nil
+        handshakeUUID = nil
+        pendingRequestHash = nil
+        pendingDomain = nil
+        receiveBuffer.removeAll()
     }
 }
 
@@ -489,16 +570,34 @@ extension BLEService: CBPeripheralDelegate {
         }
     }
 
-    /// 发起密钥协商
+    /// 发起密钥协商（发送 session_info_request 握手消息）
     private func requestSessionNegotiation() {
         guard let peripheral = connectedPeripheral,
               let writeChar = writeCharacteristic,
               let localPrivateKey = localPrivateKey else { return }
 
-        // 发送本地公钥进行 ECDH 协商
+        // 客户端公钥 SEC1 编码（04||x||y）
         let publicKeyData = localPrivateKey.publicKey.rawRepresentation
-        peripheral.writeValue(publicKeyData, for: writeChar, type: .withResponse)
-        sessionStage = .awaitingVehiclePublicKey
+
+        // 构建 session_info_request RoutableMessage
+        let (request, uuid) = TeslaProtocol.buildSessionInfoRequest(clientPublicKey: publicKeyData)
+        handshakeUUID = uuid
+
+        // 官方 BLE 格式：2 字节大端长度前缀 + 消息体
+        var framed = Data()
+        framed.append(UInt8((request.count >> 8) & 0xFF))
+        framed.append(UInt8(request.count & 0xFF))
+        framed.append(request)
+
+        let bytes = [UInt8](framed)
+        var offset = 0
+        while offset < bytes.count {
+            let end = min(offset + maxPayloadBytes, bytes.count)
+            let chunk = Data(bytes[offset..<end])
+            offset = end
+            peripheral.writeValue(chunk, for: writeChar, type: .withResponse)
+        }
+        sessionStage = .awaitingSessionInfo
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {

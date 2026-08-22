@@ -80,6 +80,11 @@ final class DashboardViewModel: ObservableObject {
         bluetooth.disconnect()
     }
 
+    /// 设置车辆 VIN（用于命令个性化签名，必需）
+    func setVIN(_ vin: String) {
+        bluetooth.vin = vin
+    }
+
     /// 发送控制命令
     func sendCommand(_ command: VehicleControlCommand) {
         guard connectionState.isConnected else { return }

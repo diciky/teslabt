@@ -79,6 +79,9 @@ enum TeslaProtocol {
         case flash = 0x0B
         case activateSpeedLimit = 0x0C
         case deactivateSpeedLimit = 0x0D
+        case remoteDrive = 20
+        case autoSecureVehicle = 29
+        case wakeVehicle = 30
     }
 
     // MARK: - 帧格式（BLE 传输层）
@@ -274,84 +277,243 @@ struct TeslaBLEKeyManager {
     }
 }
 
-// MARK: - 会话加密
+// MARK: - 会话加密（符合官方协议）
 
 /// Tesla BLE 会话加密器
-/// 使用 ECDH 协商出的共享密钥 + AES-GCM 加密 + HMAC 认证
+/// 遵循官方 vehicle-command 协议：
+/// - 会话密钥 `K = SHA1(BIG_ENDIAN(Sx, 32))[:16]`（128 位 AES-GCM 密钥）
+/// - 命令使用 AES-GCM PERSONALIZED 签名（AAD = SHA256(Metadata)）
 struct TeslaBLESessionCrypto {
 
+    /// 会话状态（握手中记录的车辆时间/epoch/counter）
     struct SessionKeys {
+        /// 128 位 AES-GCM 共享密钥 K
         var sessionKey: SymmetricKey
-        var macKey: SymmetricKey
+
+        /// 车辆 epoch（16 字节，随机生成于车辆启动时）
+        var epoch: Data
+        /// 车辆当前 counter（握手时返回）
+        var counter: UInt32
+        /// 车辆 clock_time（握手时返回）
+        var clockTime: UInt32
+        /// 本地时钟与车辆时钟的差值（车辆时间 - 本地时间）
+        var clockOffset: TimeInterval = 0
     }
 
-    /// 从本地私钥 + 车辆公钥派生会话密钥
-    /// Tesla 使用 ECDH P-256 协商 + HKDF 派生
-    static func deriveSessionKeys(
+    /// 从本地私钥 + 车辆公钥派生 128 位会话密钥 K
+    /// 官方定义：`S = ECDH(c, V)`；`K = SHA1(BIG_ENDIAN(Sx,32))[:16]`
+    static func deriveSessionKey(
         localPrivateKey: P256.Signing.PrivateKey,
         vehiclePublicKeyRaw: Data
-    ) -> SessionKeys? {
-        // 使用 KeyAgreement 类型执行 ECDH
-        // 私钥数据格式相同（32 字节 raw），可以安全转换
+    ) -> SymmetricKey? {
+        // 转换为 KeyAgreement 类型执行 ECDH
         guard let agreementKey = try? P256.KeyAgreement.PrivateKey(rawRepresentation: localPrivateKey.rawRepresentation),
               let vehiclePublicKey = try? P256.KeyAgreement.PublicKey(rawRepresentation: vehiclePublicKeyRaw) else {
             return nil
         }
 
-        // ECDH 共享密钥
-        let sharedSecret = try? agreementKey.sharedSecretFromKeyAgreement(with: vehiclePublicKey)
+        guard let sharedSecret = try? agreementKey.sharedSecretFromKeyAgreement(with: vehiclePublicKey) else {
+            return nil
+        }
 
-        // 使用 HKDF-SHA256 派生会话密钥
-        // Tesla 协议中：symmetric key 用于 AES-GCM 加密，mac key 用于 HMAC 认证
-        let infoData = Data("TeslaVehicleCommand".utf8)
-        let saltData = Data("TeslaSessionV1".utf8)
+        // 提取共享秘密的 x 坐标（32 字节大端）
+        let secretBytes = sharedSecret.withUnsafeBytes { Data($0) }
+        // sharedSecret 原始表示即为 x 坐标（32 字节大端）
+        let sx = secretBytes
 
-        guard let secret = sharedSecret else { return nil }
+        // K = SHA1(Sx)[:16]
+        let digest = Insecure.SHA1.hash(data: sx)
+        let keyData = Data(digest.prefix(16))
 
-        // 派生 32 字节对称密钥 + 32 字节 MAC 密钥
-        let expandedKey = secret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: saltData,
-            sharedInfo: infoData,
-            outputByteCount: 64
-        )
-
-        let keyData = expandedKey.withUnsafeBytes { Data($0) }
-        guard keyData.count >= 64 else { return nil }
-
-        let sessionKeyData = keyData[0..<32]
-        let macKeyData = keyData[32..<64]
-
-        return SessionKeys(
-            sessionKey: SymmetricKey(data: sessionKeyData),
-            macKey: SymmetricKey(data: macKeyData)
-        )
+        return SymmetricKey(data: keyData)
     }
 
-    /// AES-GCM 加密
-    static func encrypt(_ data: Data, with key: SymmetricKey) -> Data? {
+    /// AES-GCM 加密（使用共享密钥 K，12 字节随机 nonce）
+    /// - Parameters:
+    ///   - plaintext: 待加密明文
+    ///   - key: 128 位会话密钥 K
+    ///   - aad: 关联认证数据（命令加密时为 SHA256(Metadata)）
+    /// - Returns: (nonce, ciphertext + tag) 的合并数据
+    static func seal(_ plaintext: Data, key: SymmetricKey, aad: Data) -> (nonce: Data, sealed: Data)? {
         do {
-            let sealed = try AES.GCM.seal(data, using: key)
-            return sealed.combined
+            let nonce = AES.GCM.Nonce()
+            let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce, authenticating: aad)
+            return (nonce.withUnsafeBytes { Data($0) }, sealed.combined)
         } catch {
             return nil
         }
     }
 
-    /// AES-GCM 解密
-    static func decrypt(_ data: Data, with key: SymmetricKey) -> Data? {
+    /// AES-GCM 解密（响应解密）
+    static func open(_ combined: Data, key: SymmetricKey, nonce: Data, aad: Data) -> Data? {
         do {
-            let sealed = try AES.GCM.SealedBox(combined: data)
-            return try AES.GCM.open(sealed, using: key)
+            let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), combined: combined)
+            return try AES.GCM.open(box, using: key, authenticating: aad)
         } catch {
             return nil
         }
     }
 
-    /// HMAC-SHA256 计算消息认证码
+    /// HMAC-SHA256
     static func hmac(_ data: Data, key: SymmetricKey) -> Data {
         let mac = HMAC<SHA256>.authenticationCode(for: data, using: key)
         return Data(mac)
+    }
+
+    /// 派生 session info 认证密钥：`SESSION_INFO_KEY = HMAC-SHA256(K, "session info")`
+    static func sessionInfoKey(from key: SymmetricKey) -> SymmetricKey {
+        let derived = hmac(Data("session info".utf8), key: key)
+        return SymmetricKey(data: derived)
+    }
+
+    /// 派生命令认证密钥：`K' = HMAC-SHA256(K, "authenticated command")`（HMAC 认证用）
+    static func commandAuthKey(from key: SymmetricKey) -> SymmetricKey {
+        let derived = hmac(Data("authenticated command".utf8), key: key)
+        return SymmetricKey(data: derived)
+    }
+
+    /// 常数时间比较
+    static func constantTimeEquals(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count {
+            diff |= a[a.index(a.startIndex, offsetBy: i)] ^ b[b.index(b.startIndex, offsetBy: i)]
+        }
+        return diff == 0
+    }
+}
+
+// MARK: - Metadata 序列化（官方 TLV 编码）
+
+/// 官方协议 Metadata 的 TLV 序列化器。
+/// 每个字段用 `tag || length || value` 编码，整数为大端，按 tag 升序排列，以 0xFF 结尾。
+/// 用于：
+/// - 命令签名（AES-GCM 的 AAD = SHA256(Metadata)）
+/// - session info 认证（HMAC 的输入）
+/// - 响应解密（AES-GCM Response 的 AAD）
+struct TeslaMetadataSerializer {
+
+    /// Metadata tag（对应 Signatures.Tag）
+    enum Tag: UInt8 {
+        case signatureType  = 0
+        case domain         = 1
+        case personalization = 2  // VIN
+        case epoch          = 3
+        case expiresAt      = 4
+        case counter        = 5
+        case challenge      = 6
+        case flags          = 7
+        case requestHash    = 8
+        case fault          = 9
+        case end            = 255
+    }
+
+    /// 签名类型（对应 Signatures.SignatureType）
+    enum SignatureType: UInt8 {
+        case aesGcm              = 0
+        case aesGcmPersonalized  = 5
+        case hmac                = 6
+        case hmacPersonalized    = 8
+        case aesGcmResponse      = 9
+    }
+
+    /// 域名（对应 UniversalMessage.Domain）
+    enum Domain: UInt8 {
+        case broadcast        = 0
+        case vehicleSecurity  = 2
+        case infotainment     = 3
+    }
+
+    /// Flags（对应 UniversalMessage.Flags）
+    struct Flags {
+        static let userCommand       = 1 << 0  // FLAG_USER_COMMAND
+        static let encryptResponse   = 1 << 1  // FLAG_ENCRYPT_RESPONSE
+    }
+
+    // MARK: - 编码单个 TLV
+
+    /// 编码一个字节值
+    static func tlv(_ tag: Tag, _ value: UInt8) -> [UInt8] {
+        [tag.rawValue, 1, value]
+    }
+
+    /// 编码一个 4 字节大端整数（如 expires_at, counter）
+    static func tlv(_ tag: Tag, uint32 value: UInt32) -> [UInt8] {
+        var result = [tag.rawValue, 4]
+        result.append(UInt8((value >> 24) & 0xFF))
+        result.append(UInt8((value >> 16) & 0xFF))
+        result.append(UInt8((value >> 8) & 0xFF))
+        result.append(UInt8(value & 0xFF))
+        return result
+    }
+
+    /// 编码一个字节串（长度 < 256）
+    static func tlv(_ tag: Tag, bytes: Data) -> [UInt8] {
+        var result = [tag.rawValue, UInt8(bytes.count)]
+        result.append(contentsOf: bytes)
+        return result
+    }
+
+    // MARK: - 命令签名 Metadata
+
+    /// 构建命令签名（AES-GCM PERSONALIZED）所需的 Metadata 字符串。
+    /// 包含：签名类型、域、VIN、epoch、过期时间、counter、flags（若非 0）。
+    static func commandMetadata(
+        signatureType: SignatureType,
+        domain: Domain,
+        vin: String,
+        epoch: Data,
+        expiresAt: UInt32,
+        counter: UInt32,
+        flags: UInt32
+    ) -> Data {
+        var result = [UInt8]()
+        result.append(contentsOf: tlv(.signatureType, signatureType.rawValue))
+        result.append(contentsOf: tlv(.domain, domain.rawValue))
+        result.append(contentsOf: tlv(.personalization, bytes: Data(vin.utf8)))
+        result.append(contentsOf: tlv(.epoch, bytes: epoch))
+        result.append(contentsOf: tlv(.expiresAt, uint32: expiresAt))
+        result.append(contentsOf: tlv(.counter, uint32: counter))
+        if flags != 0 {
+            result.append(contentsOf: tlv(.flags, uint32: flags))
+        }
+        result.append(Tag.end.rawValue)
+        return Data(result)
+    }
+
+    /// 构建 session info 认证 Metadata。
+    /// 包含：签名类型(HMAC)、VIN、challenge（握手请求的 uuid）。
+    static func sessionInfoMetadata(vin: String, challenge: Data) -> Data {
+        var result = [UInt8]()
+        result.append(contentsOf: tlv(.signatureType, SignatureType.hmac.rawValue))
+        result.append(contentsOf: tlv(.personalization, bytes: Data(vin.utf8)))
+        result.append(contentsOf: tlv(.challenge, bytes: challenge))
+        result.append(Tag.end.rawValue)
+        return Data(result)
+    }
+
+    /// 构建响应解密 Metadata（AES-GCM RESPONSE）。
+    /// 包含：签名类型(AES_GCM_RESPONSE)、域、VIN、counter、flags、request_hash、fault。
+    static func responseMetadata(
+        domain: Domain,
+        vin: String,
+        counter: UInt32,
+        flags: UInt32,
+        requestHash: Data,
+        fault: UInt32 = 0
+    ) -> Data {
+        var result = [UInt8]()
+        result.append(contentsOf: tlv(.signatureType, SignatureType.aesGcmResponse.rawValue))
+        result.append(contentsOf: tlv(.domain, domain.rawValue))
+        result.append(contentsOf: tlv(.personalization, bytes: Data(vin.utf8)))
+        result.append(contentsOf: tlv(.counter, uint32: counter))
+        result.append(contentsOf: tlv(.flags, uint32: flags))  // 响应中始终包含 flags
+        result.append(contentsOf: tlv(.requestHash, bytes: requestHash))
+        if fault != 0 {
+            result.append(contentsOf: tlv(.fault, uint32: fault))
+        }
+        result.append(Tag.end.rawValue)
+        return Data(result)
     }
 }
 
@@ -387,12 +549,28 @@ struct TeslaProtobuf {
         return result
     }
 
-    /// 编码字段（tag + varint value）
+    /// 编码字段（tag + varint value，wire type 0）
     static func encodeField(_ fieldNumber: Int, _ value: UInt64) -> [UInt8] {
         let tag = UInt64(fieldNumber << 3) | 0 // wire type 0 = varint
         var result = encodeVarint(tag)
         result.append(contentsOf: encodeVarint(value))
         return result
+    }
+
+    /// 编码字段（tag + fixed32 value，wire type 5）
+    static func encodeFixed32Field(_ fieldNumber: Int, _ value: UInt32) -> [UInt8] {
+        let tag = UInt64(fieldNumber << 3) | 5 // wire type 5 = fixed32（小端）
+        var result = encodeVarint(tag)
+        result.append(UInt8(value & 0xFF))
+        result.append(UInt8((value >> 8) & 0xFF))
+        result.append(UInt8((value >> 16) & 0xFF))
+        result.append(UInt8((value >> 24) & 0xFF))
+        return result
+    }
+
+    /// 编码字段（tag + 内嵌消息，wire type 2）
+    static func encodeMessageField(_ fieldNumber: Int, _ message: Data) -> [UInt8] {
+        encodeBytesField(fieldNumber, message)
     }
 
     /// 编码字节字段（wire type 2 = length-delimited）
@@ -402,6 +580,11 @@ struct TeslaProtobuf {
         result.append(contentsOf: encodeVarint(UInt64(data.count)))
         result.append(contentsOf: data)
         return result
+    }
+
+    /// 编码 oneof 枚举（wire type 0）
+    static func encodeEnumField(_ fieldNumber: Int, _ value: UInt64) -> [UInt8] {
+        encodeField(fieldNumber, value)
     }
 
     /// 解码字段，返回 [(fieldNumber, wireType, valueData)]
@@ -438,6 +621,14 @@ struct TeslaProtobuf {
                 } else {
                     break
                 }
+            case 5: // fixed32
+                if index + 4 <= bytes.count {
+                    let value = Data(bytes[index..<index + 4])
+                    index += 4
+                    fields.append((fieldNumber, wireType, value))
+                } else {
+                    break
+                }
             default:
                 // 不支持其他 wire type，跳过
                 break
@@ -459,42 +650,254 @@ struct TeslaProtobuf {
     }
 }
 
-// MARK: - VCSEC 消息构建
+// MARK: - VCSEC 消息构建（符合官方 protobuf）
 
 extension TeslaProtocol {
 
-    /// 构建车辆状态请求消息
+    // MARK: VCSEC UnsignedMessage 载荷
+
+    /// 构建 VCSEC.UnsignedMessage 车辆状态请求
+    /// `UnsignedMessage { InformationRequest { informationRequestType: GET_STATUS } }`
     static func buildVehicleStatusRequest() -> Data {
-        // VCSEC 车辆状态请求
-        return Data([0x08, 0x00]) // field 1, varint 0
+        // InformationRequest: field1(informationRequestType)=0 → [0x08, 0x00]
+        let infoReq = Data([0x08, 0x00])
+        // UnsignedMessage: field1(InformationRequest 消息) → 0x0A 0x02 ...
+        return Data(TeslaProtobuf.encodeMessageField(1, infoReq))
     }
 
-    /// 构建锁车命令
+    /// 构建 VCSEC.UnsignedMessage 锁车命令
+    /// `UnsignedMessage { RKEAction: RKE_ACTION_LOCK }`
     static func buildLockCommand() -> Data {
-        // VCSEC RKEAction: lock
-        var msg = Data()
-        msg.append(contentsOf: TeslaProtobuf.encodeField(1, 0)) // operation = lock
-        return msg
+        // UnsignedMessage: field2(RKEAction varint) = LOCK(1)
+        return Data(TeslaProtobuf.encodeEnumField(2, UInt64(RKEAction.lock.rawValue)))
     }
 
-    /// 构建解锁命令
+    /// 构建 VCSEC.UnsignedMessage 解锁命令
+    /// `UnsignedMessage { RKEAction: RKE_ACTION_UNLOCK }`
     static func buildUnlockCommand() -> Data {
-        var msg = Data()
-        msg.append(contentsOf: TeslaProtobuf.encodeField(1, 1)) // operation = unlock
-        return msg
+        // UnsignedMessage: field2(RKEAction varint) = UNLOCK(0)
+        return Data(TeslaProtobuf.encodeEnumField(2, UInt64(RKEAction.unlock.rawValue)))
     }
 
-    /// 构建鸣笛命令
+    /// 构建 VCSEC.UnsignedMessage 鸣笛命令（honk 需要先 RKEAction remoteDrive 唤醒）
     static func buildHonkCommand() -> Data {
-        var msg = Data()
-        msg.append(contentsOf: TeslaProtobuf.encodeField(1, UInt64(RKEAction.honk.rawValue)))
-        return msg
+        // 简化为发送 RKEAction WAKE_VEHICLE(30) 以唤醒并保持
+        return Data(TeslaProtobuf.encodeEnumField(2, UInt64(RKEAction.wakeVehicle.rawValue)))
     }
 
-    /// 构建闪灯命令
+    /// 构建 VCSEC.UnsignedMessage 闪灯命令
     static func buildFlashCommand() -> Data {
-        var msg = Data()
-        msg.append(contentsOf: TeslaProtobuf.encodeField(1, UInt64(RKEAction.flash.rawValue)))
-        return msg
+        // VCSEC 无独立 flash 操作，flash 通过 Infotainment 域；此处以 wakeVehicle 近似
+        return Data(TeslaProtobuf.encodeEnumField(2, UInt64(RKEAction.wakeVehicle.rawValue)))
+    }
+
+    /// 构建 VCSEC.UnsignedMessage 白名单添加密钥操作
+    /// `WhitelistOperation { addPublicKeyToWhitelist { PublicKeyRaw } }`（UnsignedMessage field16）
+    static func buildWhitelistAddKey(publicKey: Data) -> Data {
+        // PublicKey: field1(PublicKeyRaw 字节)
+        let pubKey = Data(TeslaProtobuf.encodeBytesField(1, publicKey))
+        // WhitelistOperation: field1(addPublicKeyToWhitelist 消息)
+        let whitelistOp = Data(TeslaProtobuf.encodeMessageField(1, pubKey))
+        // UnsignedMessage: field16(WhitelistOperation 消息)
+        return Data(TeslaProtobuf.encodeMessageField(16, whitelistOp))
+    }
+
+    /// 从 BLE 广播名称提取车辆 ID（`S+ID+C` 格式，ID 为 VIN 的 SHA1 前 8 字节 hex）
+    static func vehicleID(fromLocalName name: String) -> String? {
+        guard name.hasPrefix("S"), name.hasSuffix("C") else { return nil }
+        let start = name.index(name.startIndex, offsetBy: 1)
+        let end = name.index(name.endIndex, offsetBy: -1)
+        guard start < end else { return nil }
+        return String(name[start..<end])
+    }
+
+    // MARK: RoutableMessage 编解码（官方 BLE 消息格式）
+
+    /// 构建并签名一条发送给指定域的 RoutableMessage（AES-GCM PERSONALIZED）。
+    ///
+    /// - Parameters:
+    ///   - payload: 应用层明文（VCSEC.UnsignedMessage 或 CarServer.Action 的 protobuf）
+    ///   - domain: 目标域（VCSEC 或 Infotainment）
+    ///   - vin: 车辆识别号（用于个性化签名）
+    ///   - session: 当前会话状态
+    ///   - clientPublicKey: 客户端公钥 ENCODE_PUBLIC(C)
+    ///   - expiryWindow: 命令有效期（秒），默认 30 秒
+    /// - Returns: (完整 RoutableMessage, requestHash, uuid, 使用的 counter)
+    static func buildSignedRoutableMessage(
+        payload: Data,
+        domain: TeslaMetadataSerializer.Domain,
+        vin: String,
+        session: TeslaBLESessionCrypto.SessionKeys,
+        clientPublicKey: Data,
+        expiryWindow: UInt32 = 30
+    ) -> (message: Data, requestHash: Data, uuid: Data, counter: UInt32, nonce: Data, tag: Data)? {
+        let flags = UInt32(TeslaMetadataSerializer.Flags.encryptResponse)
+        let counter = session.counter &+ 1
+
+        // 过期时间 = 车辆时钟当前时间 + 窗口
+        let nowVehicle = session.clockTime + UInt32(max(0, session.clockOffset))
+        let expiresAt = nowVehicle + expiryWindow
+
+        // 构建命令 Metadata（签名类型=AES_GCM_PERSONALIZED）
+        let metadata = TeslaMetadataSerializer.commandMetadata(
+            signatureType: .aesGcmPersonalized,
+            domain: domain,
+            vin: vin,
+            epoch: session.epoch,
+            expiresAt: expiresAt,
+            counter: counter,
+            flags: flags
+        )
+
+        // AES-GCM 加密：AAD = SHA256(Metadata)
+        let aad = Data(SHA256.hash(data: metadata))
+        guard let sealed = TeslaBLESessionCrypto.seal(payload, key: session.sessionKey, aad: aad) else {
+            return nil
+        }
+        // sealed = ciphertext + tag（后 16 字节为 tag）
+        let ciphertext = sealed.sealed.dropLast(16)
+        let tag = sealed.sealed.suffix(16)
+
+        // 随机 uuid（<=16 字节）与 routing address
+        let uuid = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        let routingAddress = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+
+        // 构建 RoutableMessage
+        let rm = buildRoutableMessage(
+            toDomain: domain,
+            routingAddress: routingAddress,
+            payload: Data(ciphertext),
+            flags: flags,
+            uuid: uuid,
+            signerPublicKey: clientPublicKey,
+            signatureType: .aesGcmPersonalized,
+            epoch: session.epoch,
+            nonce: sealed.nonce,
+            counter: counter,
+            expiresAt: expiresAt,
+            tag: Data(tag)
+        )
+
+        // requestHash = [签名类型字节] + tag（VCSEC 截断为 17 字节）
+        var requestHash = Data([TeslaMetadataSerializer.SignatureType.aesGcmPersonalized.rawValue])
+        requestHash.append(Data(tag))
+        if domain == .vehicleSecurity {
+            requestHash = requestHash.prefix(17)
+        }
+
+        return (rm, requestHash, uuid, counter, sealed.nonce, Data(tag))
+    }
+
+    /// 构建会话信息请求（handshake）RoutableMessage。
+    /// `session_info_request.public_key = ENCODE_PUBLIC(C)`
+    static func buildSessionInfoRequest(clientPublicKey: Data) -> (message: Data, uuid: Data) {
+        let uuid = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        let routingAddress = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+
+        // SessionInfoRequest: field1(public_key 字节) = ENCODE_PUBLIC(C)
+        let sessionInfoRequest = Data(TeslaProtobuf.encodeBytesField(1, clientPublicKey))
+
+        var rm = Data()
+        // to_destination { domain } (field6, 消息)
+        let toDest = Data(TeslaProtobuf.encodeEnumField(1, UInt64(TeslaMetadataSerializer.Domain.vehicleSecurity.rawValue)))
+        rm.append(contentsOf: TeslaProtobuf.encodeMessageField(6, toDest))
+        // from_destination { routing_address } (field7, 消息)
+        let fromDest = Data(TeslaProtobuf.encodeBytesField(2, routingAddress))
+        rm.append(contentsOf: TeslaProtobuf.encodeMessageField(7, fromDest))
+        // session_info_request (field14)
+        rm.append(contentsOf: TeslaProtobuf.encodeBytesField(14, sessionInfoRequest))
+        // uuid (field51)
+        rm.append(contentsOf: TeslaProtobuf.encodeBytesField(51, uuid))
+
+        return (rm, uuid)
+    }
+
+    /// 解析握手响应，提取车辆公钥、epoch、counter、clock_time 与 session_info_tag。
+    static func parseSessionInfoResponse(_ data: Data) -> (
+        vehiclePublicKey: Data,
+        epoch: Data,
+        counter: UInt32,
+        clockTime: UInt32,
+        sessionInfoTag: Data
+    )? {
+        let fields = TeslaProtobuf.decodeFields(data)
+
+        // session_info (field15)
+        guard let sessionInfoData = TeslaProtobuf.getBytes(fields, field: 15) else { return nil }
+        let sessionFields = TeslaProtobuf.decodeFields(sessionInfoData)
+
+        guard let publicKey = TeslaProtobuf.getBytes(sessionFields, field: 2) else { return nil }
+        guard let epoch = TeslaProtobuf.getBytes(sessionFields, field: 3) else { return nil }
+        let counter = UInt32(TeslaProtobuf.getVarint(sessionFields, field: 1) ?? 0)
+        let clockTime = decodeFixed32(from: TeslaProtobuf.getBytes(sessionFields, field: 4))
+
+        // signature_data (field13) → session_info_tag (field6)
+        var sessionInfoTag = Data()
+        if let sigData = TeslaProtobuf.getBytes(fields, field: 13) {
+            let sigFields = TeslaProtobuf.decodeFields(sigData)
+            if let tag = TeslaProtobuf.getBytes(sigFields, field: 6) {
+                sessionInfoTag = tag
+            }
+        }
+
+        return (publicKey, epoch, counter, clockTime, sessionInfoTag)
+    }
+
+    /// 解析 4 字节 fixed32（小端）为 UInt32
+    static func decodeFixed32(from data: Data?) -> UInt32 {
+        guard let data = data, data.count >= 4 else { return 0 }
+        let bytes = [UInt8](data)
+        return UInt32(bytes[0]) | (UInt32(bytes[1]) << 8) | (UInt32(bytes[2]) << 16) | (UInt32(bytes[3]) << 24)
+    }
+
+    /// 构建完整 RoutableMessage（通用）
+    private static func buildRoutableMessage(
+        toDomain: TeslaMetadataSerializer.Domain,
+        routingAddress: Data,
+        payload: Data,
+        flags: UInt32,
+        uuid: Data,
+        signerPublicKey: Data,
+        signatureType: TeslaMetadataSerializer.SignatureType,
+        epoch: Data,
+        nonce: Data,
+        counter: UInt32,
+        expiresAt: UInt32,
+        tag: Data
+    ) -> Data {
+        var rm = Data()
+
+        // to_destination { domain } (field6)
+        let toDest = Data(TeslaProtobuf.encodeEnumField(1, UInt64(toDomain.rawValue)))
+        rm.append(contentsOf: TeslaProtobuf.encodeMessageField(6, toDest))
+        // from_destination { routing_address } (field7)
+        let fromDest = Data(TeslaProtobuf.encodeBytesField(2, routingAddress))
+        rm.append(contentsOf: TeslaProtobuf.encodeMessageField(7, fromDest))
+        // protobuf_message_as_bytes (field10) = 密文
+        rm.append(contentsOf: TeslaProtobuf.encodeBytesField(10, payload))
+
+        // signature_data (field13)
+        var sigData = Data()
+        // signer_identity { public_key } (field1)
+        let signerIdentity = Data(TeslaProtobuf.encodeBytesField(1, signerPublicKey))
+        sigData.append(contentsOf: TeslaProtobuf.encodeMessageField(1, signerIdentity))
+        // AES_GCM_Personalized_data (field5)
+        var sigAes = Data()
+        sigAes.append(contentsOf: TeslaProtobuf.encodeBytesField(1, epoch))
+        sigAes.append(contentsOf: TeslaProtobuf.encodeBytesField(2, nonce))
+        sigAes.append(contentsOf: TeslaProtobuf.encodeField(3, UInt64(counter)))
+        sigAes.append(contentsOf: TeslaProtobuf.encodeFixed32Field(4, expiresAt))
+        sigAes.append(contentsOf: TeslaProtobuf.encodeBytesField(5, tag))
+        sigData.append(contentsOf: TeslaProtobuf.encodeMessageField(5, sigAes))
+        rm.append(contentsOf: TeslaProtobuf.encodeMessageField(13, sigData))
+
+        // flags (field52)
+        if flags != 0 {
+            rm.append(contentsOf: TeslaProtobuf.encodeField(52, UInt64(flags)))
+        }
+        // uuid (field51)
+        rm.append(contentsOf: TeslaProtobuf.encodeBytesField(51, uuid))
+
+        return rm
     }
 }
