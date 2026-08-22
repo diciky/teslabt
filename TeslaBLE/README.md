@@ -111,6 +111,27 @@ xcodebuild -exportArchive \
 - 节点需预装 Xcode，并配置好开发签名证书/描述文件
 - 流水线执行 `xcodebuild archive` + `-exportArchive`，产物位于构建工作区 `build/export/TeslaBLE.ipa`
 
+**方式三：GitHub Actions 云构建（推荐，开箱即用）**
+
+本仓库已内置 `.github/workflows/build-ipa.yml`，上传到 **GitHub** 后，利用 GitHub 官方托管的 **macOS 云构建机（macos-14，预装 Xcode）** 自动编译并产出 `.ipa`，**无需自建 Runner**。
+
+使用步骤：
+
+1. 在 GitHub 新建仓库，把本目录内容推上去（含 `.github/workflows/build-ipa.yml`）；
+2. 触发构建：推送到 `main` 会自动触发，也可在 Actions 页手动点 **Run workflow**；
+3. 构建完成后，在 Actions 运行页的 **Artifacts** 里下载 `TeslaBLE-ipa` 压缩包，解压即得 `TeslaBLE.ipa`。
+
+默认**无签名构建**（可用于模拟器 / 越狱设备 / 后续自签名）。若要在真机安装，请在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置：
+
+| Secret | 说明 |
+|--------|------|
+| `APPLE_CERTIFICATE_P12` | base64 编码的 `.p12` 发布证书 |
+| `APPLE_CERTIFICATE_PASSWORD` | 证书密码 |
+| `APPLE_PROVISIONING_PROFILE` | base64 编码的 `.mobileprovision` 描述文件 |
+| `DEVELOPMENT_TEAM` | Apple 开发者 Team ID |
+
+配好后 workflow 会自动签名并导出可安装到真机的 `.ipa`（支持 iOS 16.6.1 及以下）。
+
 ### 安装
 
 将生成的 `.ipa` 通过 Xcode / Apple Configurator / 第三方工具（如 `ios-deploy`）安装到已签名的设备上。
