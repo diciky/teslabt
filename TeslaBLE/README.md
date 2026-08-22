@@ -1,15 +1,16 @@
 # TeslaBLE — Tesla 蓝牙低延迟数据收发显示 App
 
-基于 **Tesla 车辆 BLE（蓝牙低功耗）** 协议的 iOS 应用，实现手机与车辆之间的**低延迟数据发送 / 接收 / 实时显示**。
+基于 **Tesla 车辆真实 BLE 协议** 的 iOS 应用，实现手机与车辆之间的**低延迟数据发送 / 接收 / 实时显示**，支持本地车辆控制（锁车、解锁、鸣笛、闪灯等），无需云端 API。
 
 ## 功能特性
 
-- 🔍 **自动扫描并连接 Tesla 车辆**（BLE Central）
-- 📡 **低延迟数据收发**：采用 GATT `Notify + Write` 通道，帧头校验 + 序列号 + CRC-8 实现低延迟确认与丢包检测
+- 🔍 **自动扫描并连接 Tesla 车辆**（BLE Central，使用真实 Tesla Service UUID）
+- 🔐 **P-256 ECDH 密钥协商 + AES-GCM 加密 + HMAC 认证**
+- 🎛️ **车辆控制**：锁车、解锁、鸣笛、闪灯、状态查询
 - 📊 **实时显示**：车速、电量、里程、温度等遥测数据的实时展示
 - ⚡ **传输统计**：平均/最近延迟、吞吐率、收发包数、丢包率
-- 🎛️ **低延迟模式开关**：可切换不同收发策略
-- 📱 **SwiftUI + CoreBluetooth**，原生实现，运行于 iOS 15+
+- 🎯 **低延迟模式开关**：可切换不同收发策略
+- 📱 **SwiftUI + CoreBluetooth + CryptoKit**，原生实现，运行于 iOS 15+
 
 ## 技术架构
 
@@ -22,43 +23,56 @@
 │  DashboardViewModel                               │
 ├─────────────────────────────────────────────────┤
 │               Service 层 (CoreBluetooth)         │
-│  BLEService (Central 管理 / 收发)                 │
-│  TeslaProtocol (帧编解码 / CRC / 协议常量)         │
+│  BLEService (Central 管理 / 会话加密 / 收发)      │
+│  TeslaProtocol (UUID / 帧协议 / 消息构建)         │
+│  TeslaBLEKeyManager (Keychain 密钥管理)           │
+│  TeslaBLESessionCrypto (ECDH / AES-GCM / HMAC)   │
 ├─────────────────────────────────────────────────┤
 │                 Model 层                         │
-│  TelemetryModel (数据样本 / 状态 / 统计)           │
+│  TelemetryModel (样本 / 状态 / 统计 / 命令)       │
 └─────────────────────────────────────────────────┘
 ```
 
-## 低延迟设计要点
+## Tesla BLE 协议
 
-1. **Notify 实时订阅**：订阅特征的通知（`setNotifyValue`），车辆数据变更即刻推送到 App，无需轮询。
-2. **单帧直发**：负载 ≤ MTU 时单帧发送，写入类型为 `.withResponse` 以获取低延迟 ACK。
-3. **序列号 + CRC-8**：每个数据帧携带序列号与校验码，可检测丢包并测量往返延迟。
-4. **大数据切分**：超过 MTU 时切分发送，避免阻塞，保证整体低延迟。
+### BLE 标识
 
-## 蓝牙协议
+| 项目 | UUID |
+|------|------|
+| 车辆服务 | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
+| 写特征 | `00000212-b2d1-43f0-9b88-960cebf8b91e` |
+| 指示特征 | `00000213-b2d1-43f0-9b88-960cebf8b91e` |
+| 蓝牙名称 | `Tesla + VIN后6位` 或基于 VIN SHA1 的格式 |
 
-| 项目 | UUID / 值 |
-|------|-----------|
-| 车辆服务 | `4fafc201-1fb5-459e-8fcc-c5c9c331914b` |
-| 数据特征 | `bef8d6c9-9c21-4c9e-b632-bd58c1009f9f` |
-| 车辆状态特征 | `0x2A6E` |
-| 电池电量特征 | `0x2A19` |
+### 安全协议
 
-帧格式（8+ 字节）：
+1. **密钥生成**：NIST P-256（secp256r1）曲线生成密钥对
+2. **白名单（配对）**：公钥添加到车辆（需车内确认）
+3. **会话协商**：ECDH 交换 + HKDF-SHA256 派生会话密钥
+4. **加密通信**：AES-GCM 加密消息 + HMAC-SHA256 认证
 
-```
-[magic(1)][len(1)][seq(2)][type(1)][payload(n)][crc(1)]
-```
+### 域
 
-## 运行与打包
+- **VCSEC**（车辆安全）：锁/解锁、后备箱、钥匙管理
+- **Infotainment**（信息娱乐）：充电、空调、媒体、车辆数据查询
 
-### 环境要求
-- macOS + Xcode 15+
-- 真机调试（BLE 需要真实设备）
+## 快速开始
+
+### 前置条件
+
+- 车辆支持 Phone Key（2021+ 大部分车型）
+- iPhone 支持 BLE（iPhone 8+ / iOS 15+）
+- 首次使用需在车辆中控屏确认白名单配对
+
+### 使用步骤
+
+1. 打开 App，点击 **扫描连接**
+2. 连接成功后，App 会自动发起密钥协商
+3. 若未认证，点击 **开始配对**，在车辆中控屏确认
+4. 认证后即可使用锁车/解锁/鸣笛/闪灯等控制功能
 
 ### 构建 .ipa
+
 ```bash
 # 在 macOS 上
 xcodebuild -project TeslaBLE.xcodeproj \
@@ -76,6 +90,7 @@ xcodebuild -exportArchive \
 ```
 
 ### 安装
+
 将生成的 `.ipa` 通过 Xcode / Apple Configurator / 第三方工具（如 `ios-deploy`）安装到已签名的设备上。
 
 ## 项目结构
@@ -87,10 +102,10 @@ TeslaBLE/
     ├── TeslaBLEApp.swift      # App 入口
     ├── Info.plist             # 权限（蓝牙）+ 后台模式
     ├── Models/
-    │   └── TelemetryModel.swift
+    │   └── TelemetryModel.swift   # 数据模型 / 状态 / 命令
     ├── Services/
-    │   ├── BLEService.swift    # 蓝牙核心服务
-    │   └── TeslaProtocol.swift # 协议封装
+    │   ├── BLEService.swift       # 蓝牙核心服务（连接/加密/收发）
+    │   └── TeslaProtocol.swift    # 协议常量 / 密钥管理 / 加密 / 消息
     ├── ViewModels/
     │   └── DashboardViewModel.swift
     └── Views/
@@ -98,10 +113,16 @@ TeslaBLE/
         └── DashboardView.swift
 ```
 
-## 说明
+## 注意事项
 
-> Tesla 官方车辆 BLE 协议包含加密握手与密钥协商。本工程提供了完整的可运行 BLE 收发架构、帧协议与 UI 骨架；生产对接真实车辆时，请结合 Tesla 官方 SDK / 车辆密钥进行适配。本代码可在模拟器之外的测试环境下配合 BLE 调试设备验证低延迟收发链路。
+- 需要车辆支持 Phone Key（大多数 2021+ 车型）
+- 私钥安全存储在 iOS Keychain，丢失需重新配对
+- BLE 距离有限（通常几米到十几米），适合车库/家用本地场景
+- 老款车型（2021 年前的部分 S/X）可能不支持新协议
+- 非官方实现可能因固件更新失效，使用风险自担
 
-## License
+## 参考资源
 
-MIT
+- [Tesla Vehicle Command SDK](https://github.com/teslamotors/vehicle-command)
+- [TeslaBT API 非官方文档](https://www.teslabtapi.com)
+- [Tesla Protobufs](https://github.com/acvigue/TeslaProtobufs)

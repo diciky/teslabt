@@ -68,11 +68,40 @@ struct TransferStats {
     var throughputBytesPerSec: Double = 0
 }
 
-/// 可展示的车辆状态汇总
+/// 车辆状态（从 BLE 解密响应解析）
 struct VehicleStatus {
     var speedKmh: Double = 0
     var batteryPercent: Int = 0
     var odometerKm: Double = 0
     var state: String = "unknown"
     var temperatureC: Double = 0
+    var locked: Bool = false
+    var chargePortOpen: Bool = false
+    var charging: Bool = false
+    var climateOn: Bool = false
+    var sentryMode: Bool = false
+    var rangeKm: Double = 0
+    var insideTemp: Double = 0
+    var outsideTemp: Double = 0
+}
+
+/// 车辆控制命令类型
+enum VehicleControlCommand: String, CaseIterable, Identifiable {
+    case lock = "锁车"
+    case unlock = "解锁"
+    case honk = "鸣笛"
+    case flash = "闪灯"
+    case status = "状态查询"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .lock: return "lock.fill"
+        case .unlock: return "lock.open.fill"
+        case .honk: return "bell.fill"
+        case .flash: return "lightbulb.fill"
+        case .status: return "car.fill"
+        }
+    }
 }
