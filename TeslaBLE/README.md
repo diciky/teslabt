@@ -115,16 +115,16 @@ xcodebuild -exportArchive \
 
 本仓库已内置 `.github/workflows/build-ipa.yml`，上传到 **GitHub** 后，利用 GitHub 官方托管的 **macOS 云构建机（macos-14，预装 Xcode）** 自动编译并产出 `.ipa`，**无需自建 Runner**。
 
-> 工作流文件位置：`TeslaBLE/.github/workflows/build-ipa.yml`
+> 工作流文件位置：`.github/workflows/build-ipa.yml`（位于仓库根目录，GitHub 仅自动识别根目录 `.github/workflows/` 下的工作流）
 > 工作流名称：`Build TeslaBLE IPA`（对应 Actions 页面里的工作流名）
 
 **第一步：将仓库推送到 GitHub**
 
-1. 在 GitHub 新建一个仓库（如 `teslablue`，Public / Private 均可）；
-2. 把本仓库内容推送上去，确保 `.github/workflows/build-ipa.yml` 一同包含：
+1. 在 GitHub 新建一个仓库（例如你的 `diciky/teslabt`，Public / Private 均可）；
+2. 把本仓库内容推送上去，确保根目录 `.github/workflows/build-ipa.yml` 一同包含：
 
    ```bash
-   git remote add github https://github.com/<你的用户名>/teslablue.git
+   git remote add github https://github.com/diciky/teslabt.git
    git push -u github main
    ```
 
