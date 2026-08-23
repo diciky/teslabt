@@ -115,13 +115,39 @@ xcodebuild -exportArchive \
 
 本仓库已内置 `.github/workflows/build-ipa.yml`，上传到 **GitHub** 后，利用 GitHub 官方托管的 **macOS 云构建机（macos-14，预装 Xcode）** 自动编译并产出 `.ipa`，**无需自建 Runner**。
 
-使用步骤：
+> 工作流文件位置：`TeslaBLE/.github/workflows/build-ipa.yml`
+> 工作流名称：`Build TeslaBLE IPA`（对应 Actions 页面里的工作流名）
 
-1. 在 GitHub 新建仓库，把本目录内容推上去（含 `.github/workflows/build-ipa.yml`）；
-2. 触发构建：推送到 `main` 会自动触发，也可在 Actions 页手动点 **Run workflow**；
-3. 构建完成后，在 Actions 运行页的 **Artifacts** 里下载 `TeslaBLE-ipa` 压缩包，解压即得 `TeslaBLE.ipa`。
+**第一步：将仓库推送到 GitHub**
 
-默认**无签名构建**（可用于模拟器 / 越狱设备 / 后续自签名）。若要在真机安装，请在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置：
+1. 在 GitHub 新建一个仓库（如 `teslablue`，Public / Private 均可）；
+2. 把本仓库内容推送上去，确保 `.github/workflows/build-ipa.yml` 一同包含：
+
+   ```bash
+   git remote add github https://github.com/<你的用户名>/teslablue.git
+   git push -u github main
+   ```
+
+   > 建议推送到 `main` 分支，工作流默认监听 `main` 的 `push`。
+
+**第二步：触发构建**
+
+工作流支持两种触发方式：
+
+1. **自动触发**：推送到 `main` 分支且改动涉及 `TeslaBLE/**`（`README.md` 除外）时自动运行；
+2. **手动触发**：在仓库 `Actions` 页找到 `Build TeslaBLE IPA`，点击右侧 **Run workflow** → **Run workflow** 按钮即可手动触发一次。
+
+**第三步：下载构建产物（.ipa）**
+
+1. 进入 `Actions` 页，点开对应运行记录（自动或手动触发的那次）；
+2. 滚动到页面底部的 **Artifacts** 区域；
+3. 下载 `TeslaBLE-ipa` 压缩包，解压后即为 `TeslaBLE.ipa`。
+
+> 构建在 GitHub 托管的 `macos-14` 云构建机上完成，预装 Xcode，全过程无需你准备 macOS 机器。
+
+**关于签名（真机安装）**
+
+默认是**无签名构建**（可用于模拟器 / 越狱设备 / 后续自签名）。若要在真机安装，需在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置以下 Secrets：
 
 | Secret | 说明 |
 |--------|------|
