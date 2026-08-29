@@ -2,13 +2,17 @@
 #
 # tipa 只能在 macOS + Xcode 上编译。这里用 GitHub 托管的 macOS 云构建机（macos-14）。
 # TrollStore 设备直接安装 .tipa，无需签名。
+#
+# 触发条件：推送到 main 分支（用户 GitHub 仓库 diciky/teslabt 的默认分支），
+# 或在 Actions 页面手动 Run workflow。
 name: Build XiaoZhiFlasher tipa
 
 on:
   push:
-    branches: [ auto/xiaozhi-flasher-f104 ]
+    branches: [ main ]
     paths:
       - 'XiaoZhiFlasher/**'
+      - '.github/workflows/build-tipa.yml'
   workflow_dispatch:
 
 jobs:
@@ -54,3 +58,4 @@ jobs:
         with:
           name: XiaoZhiFlasher-tipa
           path: XiaoZhiFlasher/build/Build/Products/**/XiaoZhiFlasher.tipa
+          if-no-files-found: error
