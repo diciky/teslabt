@@ -6,7 +6,7 @@ name: Build XiaoZhiFlasher tipa
 
 on:
   push:
-    branches: [ auto/xiaozhi-flasher-f104 ]
+    branches: [ main, auto/xiaozhi-flasher-f104 ]
     paths:
       - 'XiaoZhiFlasher/**'
   workflow_dispatch:
