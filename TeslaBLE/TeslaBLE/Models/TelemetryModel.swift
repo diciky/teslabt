@@ -129,3 +129,34 @@ struct VehicleStatus {
     var insideTemp: Double = 0
     var outsideTemp: Double = 0
 }
+
+// MARK: - 手机横屏展示样式
+/// 手机横屏展示样式选择
+enum LandscapeStyle: String, CaseIterable, Identifiable {
+    case speedFocus = "车速聚焦"
+    case dataGrid = "数据网格"
+    case minimal = "极简风格"
+    case classic = "经典仪表"
+
+    var id: String { rawValue }
+
+    /// 样式描述
+    var subtitle: String {
+        switch self {
+        case .speedFocus: return "大数字车速 + 关键指标"
+        case .dataGrid: return "卡片式展示所有数据"
+        case .minimal: return "只显示核心数据"
+        case .classic: return "经典仪表盘风格"
+        }
+    }
+
+    /// 样式图标
+    var icon: String {
+        switch self {
+        case .speedFocus: return "speedometer"
+        case .dataGrid: return "square.grid.2x2"
+        case .minimal: return "circle"
+        case .classic: return "gauge"
+        }
+    }
+}

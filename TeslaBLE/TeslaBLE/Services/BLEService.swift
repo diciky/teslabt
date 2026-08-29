@@ -343,6 +343,33 @@ final class BLEService: NSObject, ObservableObject {
         sendSignedMessage(TeslaProtocol.buildVehicleInfoRequest())
     }
 
+    /// 低延迟模式开关
+    /// 开启时使用 notify 实时订阅，关闭时减少推送频率
+    var isLowLatencyMode: Bool = true {
+        didSet {
+            updateLowLatencyMode()
+        }
+    }
+
+    /// 更新低延迟模式
+    private func updateLowLatencyMode() {
+        guard let peripheral = connectedPeripheral,
+              let characteristic = indicateCharacteristic else { return }
+        // 开启低延迟：Notify 实时推送
+        // 关闭低延迟：暂停 Notify 减少推送，仅手动刷新
+        peripheral.setNotifyValue(isLowLatencyMode, for: characteristic)
+    }
+
+    /// 发送遥测数据（测试用）
+    func sendTelemetry(channel: UInt8, value: Double) {
+        guard isAuthenticated else {
+            state = .error("未认证，无法发送测试数据")
+            return
+        }
+        let payload = Data(TeslaProtocol.telemetryPayload(value: value, channel: channel))
+        sendSignedMessage(payload)
+    }
+
     // MARK: - 私有方法
 
     private func loadKeys() {

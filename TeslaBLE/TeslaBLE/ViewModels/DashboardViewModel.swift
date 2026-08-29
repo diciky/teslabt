@@ -17,6 +17,14 @@ final class DashboardViewModel: ObservableObject {
     @Published var keyImportError: String?
     @Published var showPairingAlert = false
     @Published var pairingMessage: String = ""
+    /// 低延迟模式开关
+    @Published var isLowLatencyMode = true {
+        didSet {
+            bluetooth.isLowLatencyMode = isLowLatencyMode
+        }
+    }
+    /// 手机横屏展示样式
+    @Published var landscapeStyle: LandscapeStyle = .speedFocus
 
     let bluetooth = BLEService()
 
@@ -145,6 +153,15 @@ final class DashboardViewModel: ObservableObject {
     func refreshData() {
         bluetooth.requestVehicleStatus()
         bluetooth.requestVehicleInfo()
+    }
+
+    /// 发送一条测试遥测数据
+    func sendDemoData() {
+        guard connectionState.isConnected else { return }
+        let value = Double.random(in: 0...200)
+        bluetooth.sendTelemetry(channel: 1, value: value)
+        pairingMessage = String(format: "已发送测试数据：%.1f", value)
+        showPairingAlert = true
     }
 
     // MARK: - 私有方法

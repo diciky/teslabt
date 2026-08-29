@@ -8,6 +8,7 @@ import SwiftUI
 struct DashboardView: View {
     @StateObject private var viewModel = DashboardViewModel()
     @State private var showingIdentityConfig = false
+    @State private var showingStyleConfig = false
     @State private var showResetKeysAlert = false
 
     var body: some View {
@@ -22,6 +23,7 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             connectionHeader
                             deviceInfoCard
+                            styleConfigButton
                             identityConfigButton
                             Spacer()
                         }
@@ -31,6 +33,7 @@ struct DashboardView: View {
 
                         // 右侧：实时数据展示
                         VStack(spacing: 8) {
+                            lowLatencyBar
                             vehicleDataCard
                             liveDataRow
                         }
@@ -43,6 +46,8 @@ struct DashboardView: View {
                         VStack(spacing: 16) {
                             connectionHeader
                             deviceInfoCard
+                            lowLatencyBar
+                            styleConfigButton
                             vehicleDataCard
                             liveDataRow
                             identityConfigButton
@@ -66,6 +71,9 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showingIdentityConfig) {
                 IdentityConfigView(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showingStyleConfig) {
+                LandscapeStyleConfigView(selectedStyle: $viewModel.landscapeStyle)
             }
             .alert("配对状态", isPresented: $viewModel.showPairingAlert) {
                 Button("确定", role: .cancel) {}
@@ -167,67 +175,258 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - 实时车机数据卡片（横向大数字展示）
+    // MARK: - 实时车机数据卡片（根据横屏样式展示不同布局）
     private var vehicleDataCard: some View {
+        Group {
+            switch viewModel.landscapeStyle {
+            case .speedFocus:
+                speedFocusLayout
+            case .dataGrid:
+                dataGridLayout
+            case .minimal:
+                minimalLayout
+            case .classic:
+                classicLayout
+            }
+        }
+    }
+
+    // MARK: 样式 1 - 车速聚焦
+    private var speedFocusLayout: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("实时车机数据")
+            Text("实时车机数据 · 车速聚焦")
                 .font(.caption)
                 .fontWeight(.bold)
                 .foregroundColor(.secondary)
 
-            // 大数字横向排列：速度 / 电量 / 里程
-            HStack(spacing: 16) {
+            // 大数字车速
+            HStack(spacing: 20) {
                 metricCard(
                     value: String(format: "%.0f", viewModel.vehicleStatus.speedKmh),
                     unit: "km/h",
                     label: "车速",
-                    color: .blue
+                    color: .blue,
+                    fontSize: 48
                 )
-                metricCard(
-                    value: "\(viewModel.vehicleStatus.batteryPercent)",
-                    unit: "%",
-                    label: "电量",
-                    color: .green
-                )
-                metricCard(
-                    value: String(format: "%.1f", viewModel.vehicleStatus.odometerKm),
-                    unit: "km",
-                    label: "里程",
-                    color: .orange
-                )
+                VStack(spacing: 12) {
+                    smallMetricCard(value: "\(viewModel.vehicleStatus.batteryPercent)", unit: "%", label: "电量", color: .green)
+                    smallMetricCard(value: String(format: "%.1f", viewModel.vehicleStatus.odometerKm), unit: "km", label: "里程", color: .orange)
+                }
             }
 
-            // 状态标签行
-            HStack(spacing: 12) {
-                statusBadge(icon: viewModel.vehicleStatus.locked ? "lock.fill" : "lock.open",
-                            text: viewModel.vehicleStatus.locked ? "已锁" : "已解锁",
-                            color: viewModel.vehicleStatus.locked ? .blue : .green)
-                statusBadge(icon: viewModel.vehicleStatus.charging ? "bolt.fill" : "bolt.slash",
-                            text: viewModel.vehicleStatus.charging ? "充电中" : "未充电",
-                            color: viewModel.vehicleStatus.charging ? .green : .gray)
-                statusBadge(icon: viewModel.vehicleStatus.climateOn ? "snowflake" : "thermometer",
-                            text: viewModel.vehicleStatus.climateOn ? "空调开" : "空调关",
-                            color: viewModel.vehicleStatus.climateOn ? .cyan : .gray)
-                statusBadge(icon: viewModel.vehicleStatus.sentryMode ? "eye.fill" : "eye.slash",
-                            text: viewModel.vehicleStatus.sentryMode ? "哨兵开" : "哨兵关",
-                            color: viewModel.vehicleStatus.sentryMode ? .purple : .gray)
+            statusBadgesRow
+            statsRow
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+    }
+
+    // MARK: 样式 2 - 数据网格
+    private var dataGridLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("实时车机数据 · 数据网格")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                gridMetricCard(value: String(format: "%.0f", viewModel.vehicleStatus.speedKmh), unit: "km/h", label: "车速", color: .blue, icon: "speedometer")
+                gridMetricCard(value: "\(viewModel.vehicleStatus.batteryPercent)", unit: "%", label: "电量", color: .green, icon: "battery.100")
+                gridMetricCard(value: String(format: "%.1f", viewModel.vehicleStatus.odometerKm), unit: "km", label: "里程", color: .orange, icon: "road.lanes")
+                gridMetricCard(value: "\(viewModel.stats.packetsReceived)", unit: "个", label: "接收包", color: .purple, icon: "envelope.badge")
+                gridMetricCard(value: String(format: "%.0f", viewModel.stats.throughputBytesPerSec), unit: "B/s", label: "吞吐", color: .teal, icon: "arrow.up.arrow.down")
+                gridMetricCard(value: viewModel.vehicleStatus.locked ? "已锁" : "已解锁", unit: "", label: "门锁", color: viewModel.vehicleStatus.locked ? .blue : .green, icon: "lock.fill")
             }
 
-            // 传输统计（精简）
-            HStack(spacing: 12) {
-                smallStat(title: "接收包", value: "\(viewModel.stats.packetsReceived)")
-                smallStat(title: "接收字节", value: "\(viewModel.stats.totalBytesReceived)")
-                smallStat(title: "吞吐", value: String(format: "%.0f B/s", viewModel.stats.throughputBytesPerSec))
+            statusBadgesRow
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+    }
+
+    // MARK: 样式 3 - 极简风格
+    private var minimalLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("实时车机数据 · 极简风格")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+
+            // 只显示核心数据：车速大数字
+            HStack(spacing: 16) {
+                Text(String(format: "%.0f", viewModel.vehicleStatus.speedKmh))
+                    .font(.system(size: 64, weight: .bold))
+                    .foregroundColor(.blue)
+                    .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 8) {
+                    minimalRow(label: "电量", value: "\(viewModel.vehicleStatus.batteryPercent)%", color: .green)
+                    minimalRow(label: "里程", value: String(format: "%.0f km", viewModel.vehicleStatus.odometerKm), color: .orange)
+                    minimalRow(label: "门锁", value: viewModel.vehicleStatus.locked ? "已锁" : "已解锁",
+                               color: viewModel.vehicleStatus.locked ? .blue : .green)
+                }
             }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
     }
 
-    private func metricCard(value: String, unit: String, label: String, color: Color) -> some View {
+    // MARK: 样式 4 - 经典仪表
+    private var classicLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("实时车机数据 · 经典仪表")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+
+            // 模拟仪表盘风格
+            ZStack {
+                // 圆形仪表背景
+                Circle()
+                    .stroke(Color(.systemGray4), lineWidth: 2)
+                    .frame(width: 140, height: 140)
+
+                // 刻度
+                ForEach(0..<12) { i in
+                    Rectangle()
+                        .fill(i == 0 ? Color.blue : Color(.systemGray3))
+                        .frame(width: 2, height: i == 0 ? 14 : 8)
+                        .offset(y: -60)
+                        .rotationEffect(.degrees(Double(i) * 30))
+                }
+
+                // 指针（按速度旋转）
+                classicGaugeContent
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+
+            // 辅助数据
+            HStack(spacing: 12) {
+                smallStat(title: "电量", value: "\(viewModel.vehicleStatus.batteryPercent)%")
+                smallStat(title: "里程", value: String(format: "%.1f km", viewModel.vehicleStatus.odometerKm))
+                smallStat(title: "吞吐", value: String(format: "%.0f B/s", viewModel.stats.throughputBytesPerSec))
+            }
+
+            statusBadgesRow
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+    }
+
+    /// 经典仪表指针+数值
+    private var classicGaugeContent: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                Text(String(format: "%.0f", viewModel.vehicleStatus.speedKmh))
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(.blue)
+                Text("km/h")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            // 指针：在仪表盘中心旋转
+            GeometryReader { geo in
+                let angle = -90 + (min(viewModel.vehicleStatus.speedKmh, 240) / 240.0 * 270.0)
+                Capsule()
+                    .fill(Color.blue)
+                    .frame(width: 3, height: geo.size.height * 0.35)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .offset(y: -geo.size.height * 0.175)
+                    .rotationEffect(.degrees(angle))
+            }
+        }
+    }
+
+    // MARK: - 共享视图组件
+    private var statusBadgesRow: some View {
+        HStack(spacing: 12) {
+            statusBadge(icon: viewModel.vehicleStatus.locked ? "lock.fill" : "lock.open",
+                        text: viewModel.vehicleStatus.locked ? "已锁" : "已解锁",
+                        color: viewModel.vehicleStatus.locked ? .blue : .green)
+            statusBadge(icon: viewModel.vehicleStatus.charging ? "bolt.fill" : "bolt.slash",
+                        text: viewModel.vehicleStatus.charging ? "充电中" : "未充电",
+                        color: viewModel.vehicleStatus.charging ? .green : .gray)
+            statusBadge(icon: viewModel.vehicleStatus.climateOn ? "snowflake" : "thermometer",
+                        text: viewModel.vehicleStatus.climateOn ? "空调开" : "空调关",
+                        color: viewModel.vehicleStatus.climateOn ? .cyan : .gray)
+            statusBadge(icon: viewModel.vehicleStatus.sentryMode ? "eye.fill" : "eye.slash",
+                        text: viewModel.vehicleStatus.sentryMode ? "哨兵开" : "哨兵关",
+                        color: viewModel.vehicleStatus.sentryMode ? .purple : .gray)
+        }
+    }
+
+    private var statsRow: some View {
+        HStack(spacing: 12) {
+            smallStat(title: "接收包", value: "\(viewModel.stats.packetsReceived)")
+            smallStat(title: "接收字节", value: "\(viewModel.stats.totalBytesReceived)")
+            smallStat(title: "吞吐", value: String(format: "%.0f B/s", viewModel.stats.throughputBytesPerSec))
+        }
+    }
+
+    /// 小尺寸指标卡片（速度聚焦样式用）
+    private func smallMetricCard(value: String, unit: String, label: String, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Text(value)
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(color)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(unit)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(label)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemBackground)))
+    }
+
+    /// 网格指标卡片（数据网格样式用）
+    private func gridMetricCard(value: String, unit: String, label: String, color: Color, icon: String) -> some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundColor(color)
+                Text(label)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(color)
+            if !unit.isEmpty {
+                Text(unit)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemBackground)))
+    }
+
+    /// 极简行
+    private func minimalRow(label: String, value: String, color: Color) -> some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.body.bold())
+                .foregroundColor(color)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func metricCard(value: String, unit: String, label: String, color: Color, fontSize: CGFloat = 32) -> some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(.system(size: 32, weight: .bold))
+                .font(.system(size: fontSize, weight: .bold))
                 .foregroundColor(color)
             HStack(spacing: 2) {
                 Text(unit)
@@ -309,6 +508,65 @@ struct DashboardView: View {
                 }
                 .frame(maxHeight: 120)
             }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+    }
+
+    // MARK: - 横屏样式配置入口
+    private var styleConfigButton: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("横屏样式")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+
+            Button(action: { showingStyleConfig = true }) {
+                HStack {
+                    Image(systemName: viewModel.landscapeStyle.icon)
+                    Text("\(viewModel.landscapeStyle.rawValue)")
+                        .font(.caption)
+                    Spacer()
+                    Text(viewModel.landscapeStyle.subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(.tertiarySystemBackground)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
+    }
+
+    // MARK: - 低延迟模式控制栏
+    private var lowLatencyBar: some View {
+        HStack(spacing: 10) {
+            Toggle("", isOn: $viewModel.isLowLatencyMode)
+                .toggleStyle(.switch)
+                .labelsHidden()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("低延迟模式")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                Text(viewModel.isLowLatencyMode ? "Notify 实时推送" : "手动刷新")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: { viewModel.sendDemoData() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "paperplane.fill")
+                    Text("发送测试")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!viewModel.connectionState.isConnected)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground)))
@@ -416,6 +674,58 @@ struct IdentityConfigView: View {
                 }
             }
             .navigationTitle("身份配置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 横屏样式配置 Sheet
+struct LandscapeStyleConfigView: View {
+    @Binding var selectedStyle: LandscapeStyle
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section(header: Text("选择手机横屏展示样式")) {
+                    ForEach(LandscapeStyle.allCases) { style in
+                        Button {
+                            selectedStyle = style
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: style.icon)
+                                    .font(.title3)
+                                    .foregroundColor(.blue)
+                                    .frame(width: 40)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(style.rawValue)
+                                        .font(.body)
+                                    Text(style.subtitle)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if selectedStyle == style {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Section(footer: Text("样式将在手机横屏时生效，竖屏仍保持默认布局。")) {
+                    EmptyView()
+                }
+            }
+            .navigationTitle("横屏样式")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
