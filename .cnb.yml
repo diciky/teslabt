@@ -1,0 +1,80 @@
+# XiaoZhiFlasher iOS tipa 构建流水线
+#
+# tipa 只能在 macOS + Xcode 上编译生成。通过 CNB 自托管 macOS Runner 执行。
+# 部署目标：IPHONEOS_DEPLOYMENT_TARGET = 15.0
+main:
+  push:
+    - name: build-tipa
+      runner:
+        namespace: group
+        tags:
+          - mac
+          - arm64
+          - xcode
+      stages:
+        - name: build-app
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/XiaoZhiFlasher"
+            xcodebuild \
+              -project XiaoZhiFlasher.xcodeproj \
+              -scheme XiaoZhiFlasher \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              -allowProvisioningUpdates \
+              build
+        - name: make-tipa
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/XiaoZhiFlasher"
+            APP=$(find build/Build/Products -name "*.app" -type d | head -1)
+            if [ -z "$APP" ]; then
+              echo "未找到 .app 产物"; exit 1
+            fi
+            cd "$(dirname "$APP")"
+            rm -f XiaoZhiFlasher.tipa
+            zip -r XiaoZhiFlasher.tipa "$(basename "$APP")"
+            echo "=== tipa 产物 ==="
+            ls -lh XiaoZhiFlasher.tipa
+        - name: report
+          script: |
+            echo "tipa 已生成（TrollStore 可直接安装，免签名）"
+$:
+  api_trigger:
+    - name: build-tipa
+      runner:
+        namespace: group
+        tags:
+          - mac
+          - arm64
+          - xcode
+      stages:
+        - name: build-app
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/XiaoZhiFlasher"
+            xcodebuild \
+              -project XiaoZhiFlasher.xcodeproj \
+              -scheme XiaoZhiFlasher \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath build \
+              -allowProvisioningUpdates \
+              build
+        - name: make-tipa
+          script: |
+            set -e
+            cd "$CNB_BUILD_WORKSPACE/XiaoZhiFlasher"
+            APP=$(find build/Build/Products -name "*.app" -type d | head -1)
+            if [ -z "$APP" ]; then
+              echo "未找到 .app 产物"; exit 1
+            fi
+            cd "$(dirname "$APP")"
+            rm -f XiaoZhiFlasher.tipa
+            zip -r XiaoZhiFlasher.tipa "$(basename "$APP")"
+            echo "=== tipa 产物 ==="
+            ls -lh XiaoZhiFlasher.tipa
+        - name: report
+          script: |
+            echo "tipa 已生成（TrollStore 可直接安装，免签名）"
