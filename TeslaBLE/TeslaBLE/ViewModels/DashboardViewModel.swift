@@ -1,16 +1,30 @@
 import Foundation
 import Combine
 
-/// 仪表盘视图模型：编排蓝牙服务、汇总统计、驱动 UI
+/// 精简版视图模型：聚焦蓝牙接收车机数据
 final class DashboardViewModel: ObservableObject {
 
     @Published var connectionState: BLEConnectionState = .idle
     @Published var samples: [TelemetrySample] = []
     @Published var stats = TransferStats()
+    @Published var deviceInfo = DeviceInfo()
     @Published var vehicleStatus = VehicleStatus()
-    @Published var isLowLatencyMode = true
     @Published var isAuthenticated = false
     @Published var sessionStageText = "未连接"
+    @Published var vinInput: String = ""
+    @Published var privateKeyInput: String = ""
+    @Published var vinError: String?
+    @Published var keyImportError: String?
+    @Published var showPairingAlert = false
+    @Published var pairingMessage: String = ""
+    /// 低延迟模式开关
+    @Published var isLowLatencyMode = true {
+        didSet {
+            bluetooth.isLowLatencyMode = isLowLatencyMode
+        }
+    }
+    /// 手机横屏展示样式
+    @Published var landscapeStyle: LandscapeStyle = .speedFocus
 
     let bluetooth = BLEService()
 
@@ -23,6 +37,14 @@ final class DashboardViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 self?.connectionState = state
+            }
+            .store(in: &cancellables)
+
+        // 订阅设备信息
+        bluetooth.$deviceInfo
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] info in
+                self?.deviceInfo = info
             }
             .store(in: &cancellables)
 
@@ -72,6 +94,8 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    // MARK: - 连接控制
+
     func start() {
         bluetooth.startScanning(vehicleName: nil)
     }
@@ -80,49 +104,64 @@ final class DashboardViewModel: ObservableObject {
         bluetooth.disconnect()
     }
 
-    /// 设置车辆 VIN（用于命令个性化签名，必需）
-    func setVIN(_ vin: String) {
-        bluetooth.vin = vin
-    }
+    // MARK: - 身份配置
 
-    /// 发送控制命令
-    func sendCommand(_ command: VehicleControlCommand) {
-        guard connectionState.isConnected else { return }
-        switch command {
-        case .lock:
-            bluetooth.sendLockCommand()
-        case .unlock:
-            bluetooth.sendUnlockCommand()
-        case .honk:
-            bluetooth.sendHonkCommand()
-        case .flash:
-            bluetooth.sendFlashCommand()
-        case .status:
-            bluetooth.requestVehicleStatus()
+    /// 写入 VIN（验证后保存）
+    func saveVIN() {
+        let result = bluetooth.setVIN(vinInput)
+        switch result {
+        case .success(let validVIN):
+            vinInput = validVIN
+            vinError = nil
+            deviceInfo.vin = validVIN
+        case .failure(let error):
+            vinError = error
         }
     }
 
-    /// 发送一条遥测数据（测试用）
-    func sendDemoData() {
-        guard connectionState.isConnected else { return }
-        let value = Double.random(in: 0...100)
-        bluetooth.sendTelemetry(channel: 1, value: value)
+    /// 导入私钥
+    func importKey() {
+        guard !privateKeyInput.isEmpty else {
+            keyImportError = "请粘贴私钥内容"
+            return
+        }
+        let result = bluetooth.importPrivateKey(privateKeyInput)
+        switch result {
+        case .success:
+            keyImportError = nil
+            privateKeyInput = ""
+            pairingMessage = "私钥导入成功"
+            showPairingAlert = true
+        case .failure(let error):
+            keyImportError = error
+        }
     }
 
-    /// 发送自定义文本负载
-    func sendText(_ text: String) {
-        let payload = Array(text.utf8)
-        bluetooth.sendCustomData(payload)
-    }
-
-    /// 触发白名单配对
-    func startWhitelist() {
+    /// TRUST 配对
+    func startPairing() {
         bluetooth.startWhitelist()
     }
 
     /// 重置密钥
     func resetKeys() {
         bluetooth.resetKeys()
+        pairingMessage = "密钥已重置，需重新配对"
+        showPairingAlert = true
+    }
+
+    /// 请求车辆数据刷新
+    func refreshData() {
+        bluetooth.requestVehicleStatus()
+        bluetooth.requestVehicleInfo()
+    }
+
+    /// 发送一条测试遥测数据
+    func sendDemoData() {
+        guard connectionState.isConnected else { return }
+        let value = Double.random(in: 0...200)
+        bluetooth.sendTelemetry(channel: 1, value: value)
+        pairingMessage = String(format: "已发送测试数据：%.1f", value)
+        showPairingAlert = true
     }
 
     // MARK: - 私有方法
@@ -140,6 +179,8 @@ final class DashboardViewModel: ObservableObject {
         var status = vehicleStatus
         status.batteryPercent = state.batteryLevel
         status.locked = state.locked
+        status.speedKmh = state.speedKmh
+        status.odometerKm = state.odometerKm
         status.chargePortOpen = state.chargePortOpen
         status.charging = state.charging
         status.climateOn = state.climateOn
@@ -149,14 +190,13 @@ final class DashboardViewModel: ObservableObject {
     }
 
     private func updateVehicleStatus(from samples: [TelemetrySample]) {
-        // 从最近样本中提取车辆状态（channel 1=车速 2=电量 3=里程 4=温度）
         var status = vehicleStatus
         for sample in samples.suffix(20) {
             switch sample.channel {
             case "ch1": status.speedKmh = sample.value
             case "ch2": status.batteryPercent = Int(sample.value)
             case "ch3": status.odometerKm = sample.value
-            case "ch4": status.temperatureC = sample.value
+            case "ch4": status.insideTemp = sample.value
             default: break
             }
         }

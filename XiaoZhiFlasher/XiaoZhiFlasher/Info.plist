@@ -21,9 +21,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>需要访问蓝牙以连接您的 Tesla 车辆，实现低延迟数据收发。</string>
+	<string>需要访问蓝牙以连接您的小智 WeMate 设备，实现配置、备份与刷机。</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>需要使用蓝牙与 Tesla 车辆通信。</string>
+	<string>需要使用蓝牙与小智 WeMate 设备通信。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
@@ -39,9 +39,9 @@
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
+		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
-		<string>UIInterfaceOrientationPortrait</string>
 	</array>
 </dict>
 </plist>
