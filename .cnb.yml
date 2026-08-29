@@ -1,7 +1,6 @@
 # XiaoZhiFlasher iOS tipa 构建流水线
 #
 # tipa 只能在 macOS + Xcode 上编译生成。通过 CNB 自托管 macOS Runner 执行。
-# 部署目标：IPHONEOS_DEPLOYMENT_TARGET = 15.0
 main:
   push:
     - name: build-tipa
@@ -9,9 +8,13 @@ main:
         namespace: group
         tags:
           - mac
-          - arm64
-          - xcode
       stages:
+        - name: check-env
+          script: |
+            echo "Checking environment..."
+            uname -a
+            sw_vers 2>/dev/null || echo "Not macOS"
+            which xcodebuild 2>/dev/null || echo "No xcodebuild"
         - name: build-app
           script: |
             set -e
@@ -47,9 +50,13 @@ $:
         namespace: group
         tags:
           - mac
-          - arm64
-          - xcode
       stages:
+        - name: check-env
+          script: |
+            echo "Checking environment..."
+            uname -a
+            sw_vers 2>/dev/null || echo "Not macOS"
+            which xcodebuild 2>/dev/null || echo "No xcodebuild"
         - name: build-app
           script: |
             set -e
