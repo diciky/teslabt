@@ -1,180 +1,76 @@
-# TeslaBLE — Tesla 蓝牙低延迟数据收发显示 App
+# TeslaBLE — 特斯拉车机蓝牙数据接收 App
 
-基于 **Tesla 官方 Vehicle Command 协议（`github.com/teslamotors/vehicle-command`）** 的 iOS 应用，实现手机与车辆之间的**低延迟数据发送 / 接收 / 实时显示**，支持本地车辆控制（锁车、解锁、鸣笛、闪灯等），无需云端 API。
+基于 **Tesla 官方 Vehicle Command 协议（`github.com/teslamotors/vehicle-command`）** 的 iOS 应用，**只做一件事**：通过蓝牙接收车机数据并在手机上实时展示。
 
-## 功能特性
+## 功能
 
-- 🔍 **自动扫描并连接 Tesla 车辆**（BLE Central，使用真实 Tesla Service UUID `00000211`）
-- 🔐 **P-256 ECDH 密钥协商 + 128 位 AES-GCM 加密**（符合官方协议 `K = SHA1(Sx)[:16]`）
-- 🔏 **AES-GCM PERSONALIZED 命令签名**（AAD = SHA256(Metadata)，含 VIN/epoch/counter/过期时间）
-- 🛡️ **session info 认证**（HMAC-SHA256 防 MITM）与 **响应解密**（request hash）
-- 🎛️ **车辆控制**：锁车、解锁、鸣笛、闪灯、状态查询
-- 📊 **实时显示**：车辆状态（锁/解锁等）与原始数据流实时展示
-- ⚡ **传输统计**：平均/最近延迟、吞吐率、收发包数、丢包率
-- 🎯 **低延迟模式开关**：可切换不同收发策略
-- 📱 **SwiftUI + CoreBluetooth + CryptoKit**，原生实现，运行于 iOS 15+（含 iOS 16.6.1 及以下版本）
+### 📊 设备识别
+- 固件版本：实时获取车机固件信息
+- VIN：显示当前绑定的车辆识别号
+- 配对标志：TRUST 配对状态（✅ 已配对 / ❌ 未配对）
+- 链路状态：连接状态实时显示（扫描中 / 连接中 / 密钥协商中 / 已认证 / 已断开）
+
+### 🚗 身份配置
+- **VIN 写入**：17 位字符，自动排除 I/O/Q，格式校验后保存到 Keychain
+- **私钥导入**：支持 PEM 格式（KEYBEGIN/KEYEND 包裹），解析后安全存储
+- **TRUST 配对**：一键发起白名单操作，需在车内中控屏确认
+
+### 🎛️ 显示
+- **横向布局**：适配手机横屏，大数字展示车速、电量、里程
+- **实时数据流**：车机推送的原始数据实时刷新显示
 
 ## 技术架构
 
 ```
-┌─────────────────────────────────────────────────┐
-│                      UI 层 (SwiftUI)            │
-│  DashboardView / ContentView                     │
-├─────────────────────────────────────────────────┤
-│               ViewModel 层 (MVVM)                │
-│  DashboardViewModel                               │
-├─────────────────────────────────────────────────┤
-│               Service 层 (CoreBluetooth)         │
-│  BLEService (Central 管理 / 会话加密 / 收发)      │
-│  TeslaProtocol (UUID / 帧协议 / 消息构建)         │
-│  TeslaBLEKeyManager (Keychain 密钥管理)           │
-│  TeslaBLESessionCrypto (ECDH / AES-GCM / HMAC)   │
-├─────────────────────────────────────────────────┤
-│                 Model 层                         │
-│  TelemetryModel (样本 / 状态 / 统计 / 命令)       │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│              UI 层 (SwiftUI)             │
+│  DashboardView / IdentityConfigView       │
+├──────────────────────────────────────────┤
+│            ViewModel 层 (MVVM)           │
+│  DashboardViewModel                       │
+├──────────────────────────────────────────┤
+│            Service 层 (CoreBluetooth)    │
+│  BLEService (连接/加密/接收/解析)          │
+│  TeslaProtocol (协议/密钥/消息)            │
+├──────────────────────────────────────────┤
+│              Model 层                    │
+│  TelemetryModel (设备/遥测/统计)          │
+└──────────────────────────────────────────┘
 ```
 
 ## Tesla BLE 协议
 
 ### BLE 标识
+- 车辆服务：`00000211-b2d1-43f0-9b88-960cebf8b91e`
+- 写特征：`00000212-b2d1-43f0-9b88-960cebf8b91e`
+- 指示特征：`00000213-b2d1-43f0-9b88-960cebf8b91e`
+- 蓝牙名称：`S + <VIN的SHA1前8字节hex> + C`
 
-| 项目 | UUID |
-|------|------|
-| 车辆服务 | `00000211-b2d1-43f0-9b88-960cebf8b91e` |
-| 写特征 | `00000212-b2d1-43f0-9b88-960cebf8b91e` |
-| 指示特征 | `00000213-b2d1-43f0-9b88-960cebf8b91e` |
-| 蓝牙名称 | `S + <VIN的SHA1前8字节hex> + C`（如 `S1a87a5a75f3df858C`） |
+### 安全协议
+1. P-256 ECDH 密钥协商
+2. 会话密钥 `K = SHA1(Sx)[:16]`
+3. AES-GCM 命令签名 + HMAC 认证
+4. BLE 传输：2 字节大端长度前缀 + RoutableMessage
 
-### 安全协议（符合官方 `pkg/protocol/protocol.md`）
+## 构建
 
-1. **密钥生成**：NIST P-256（secp256r1）曲线生成密钥对
-2. **握手**：`session_info_request` 交换公钥，返回 `session_info`（epoch/counter/clock_time）
-3. **会话密钥**：`K = SHA1(BIG_ENDIAN(Sx, 32))[:16]`（128 位 AES-GCM 密钥）
-4. **session info 认证**：`SESSION_INFO_KEY = HMAC-SHA256(K, "session info")` 验证响应 tag
-5. **命令签名**：AES-GCM PERSONALIZED，AAD = SHA256(Metadata TLV)，含签名类型/域/VIN/epoch/过期时间/counter/flags
-6. **响应解密**：AES-GCM Response，AAD 含 request hash + fault
-7. **BLE 传输**：2 字节大端长度前缀 + RoutableMessage（protobuf）
-
-### 域
-
-- **VCSEC**（车辆安全）：锁/解锁、后备箱、钥匙管理
-- **Infotainment**（信息娱乐）：充电、空调、媒体、车辆数据查询
-
-## 快速开始
-
-### 前置条件
-
-- 车辆支持 Phone Key（2021+ 大部分车型）
-- iPhone 支持 BLE（iPhone 8+ / iOS 15+）
-- 首次使用需在车辆中控屏确认白名单配对
-
-### 使用步骤
-
-1. 打开 App，在顶部输入你的 **车辆 VIN**（17 位，命令个性化签名必需）并保存
-2. 点击 **扫描连接**
-3. 连接成功后，App 会自动发起密钥协商（session_info 握手）
-4. 若未认证，点击 **开始配对**，在车辆中控屏确认（首次需 NFC 卡或已授权密钥）
-5. 认证后即可使用锁车/解锁/鸣笛/闪灯等控制功能
-
-### 系统兼容性
-
-工程 `IPHONEOS_DEPLOYMENT_TARGET = 15.0`，即生成的 `.ipa` **支持 iOS 15.0 及以上全部版本**（包含 iOS 16.6.1 及以下版本）。代码未使用任何 iOS 17+ 独占 API，可放心在 iOS 16.6.1 设备上安装运行。
-
-### 构建 .ipa
-
-iOS 的 `.ipa` 只能在 **macOS + Xcode** 上编译并签名，支持两种方式：
-
-**方式一：本机 macOS 手动构建**
-
-```bash
-# 在 macOS 上（需已配置 Apple 签名证书与描述文件）
-xcodebuild -project TeslaBLE.xcodeproj \
-  -scheme TeslaBLE \
-  -configuration Release \
-  -sdk iphoneos \
-  -archivePath build/TeslaBLE.xcarchive archive
-
-xcodebuild -exportArchive \
-  -archivePath build/TeslaBLE.xcarchive \
-  -exportOptionsPlist ExportOptions.plist \
-  -exportPath build/export
-
-# 产物位于 build/export/TeslaBLE.ipa
-```
-
-**方式二：CNB 云原生构建（自托管 macOS Runner）**
-
-仓库已内置 `.cnb.yml` 流水线，接入一台 macOS 自托管节点后，`push` 到 `main` 即可自动生成 `.ipa`：
-
-- 自托管节点标签需包含 `mac`、`arm64`（Apple Silicon）或 `xcode`
-- 节点需预装 Xcode，并配置好开发签名证书/描述文件
-- 流水线执行 `xcodebuild archive` + `-exportArchive`，产物位于构建工作区 `build/export/TeslaBLE.ipa`
-
-**方式三：GitHub Actions 云构建（推荐，开箱即用）**
-
-本仓库已内置 `.github/workflows/build-ipa.yml`，上传到 **GitHub** 后，利用 GitHub 官方托管的 **macOS 云构建机（macos-14，预装 Xcode）** 自动编译并产出 `.ipa`，**无需自建 Runner**。
-
-> 工作流文件位置：`.github/workflows/build-ipa.yml`（位于仓库根目录，GitHub 仅自动识别根目录 `.github/workflows/` 下的工作流）
-> 工作流名称：`Build TeslaBLE IPA`（对应 Actions 页面里的工作流名）
-
-**第一步：将仓库推送到 GitHub**
-
-1. 在 GitHub 新建一个仓库（例如你的 `diciky/teslabt`，Public / Private 均可）；
-2. 把本仓库内容推送上去，确保根目录 `.github/workflows/build-ipa.yml` 一同包含：
-
-   ```bash
-   git remote add github https://github.com/diciky/teslabt.git
-   git push -u github main
-   ```
-
-   > 建议推送到 `main` 分支，工作流默认监听 `main` 的 `push`。
-
-**第二步：触发构建**
-
-工作流支持两种触发方式：
-
-1. **自动触发**：推送到 `main` 分支且改动涉及 `TeslaBLE/**`（`README.md` 除外）时自动运行；
-2. **手动触发**：在仓库 `Actions` 页找到 `Build TeslaBLE IPA`，点击右侧 **Run workflow** → **Run workflow** 按钮即可手动触发一次。
-
-**第三步：下载构建产物（.ipa）**
-
-1. 进入 `Actions` 页，点开对应运行记录（自动或手动触发的那次）；
-2. 滚动到页面底部的 **Artifacts** 区域；
-3. 下载 `TeslaBLE-ipa` 压缩包，解压后即为 `TeslaBLE.ipa`。
-
-> 构建在 GitHub 托管的 `macos-14` 云构建机上完成，预装 Xcode，全过程无需你准备 macOS 机器。
-
-**关于签名（真机安装）**
-
-默认是**无签名构建**（可用于模拟器 / 越狱设备 / 后续自签名）。若要在真机安装，需在 GitHub 仓库 `Settings → Secrets and variables → Actions` 配置以下 Secrets：
-
-| Secret | 说明 |
-|--------|------|
-| `APPLE_CERTIFICATE_P12` | base64 编码的 `.p12` 发布证书 |
-| `APPLE_CERTIFICATE_PASSWORD` | 证书密码 |
-| `APPLE_PROVISIONING_PROFILE` | base64 编码的 `.mobileprovision` 描述文件 |
-| `DEVELOPMENT_TEAM` | Apple 开发者 Team ID |
-
-配好后 workflow 会自动签名并导出可安装到真机的 `.ipa`（支持 iOS 16.6.1 及以下）。
-
-### 安装
-
-将生成的 `.ipa` 通过 Xcode / Apple Configurator / 第三方工具（如 `ios-deploy`）安装到已签名的设备上。
+iOS 的 `.ipa` 只能在 macOS + Xcode 上编译，支持：
+- 本机 `xcodebuild` 构建
+- CNB 云原生构建（`.cnb.yml`）
+- GitHub Actions 云构建（`.github/workflows/build-ipa.yml`）
 
 ## 项目结构
 
 ```
 TeslaBLE/
-├── TeslaBLE.xcodeproj/       # Xcode 工程
+├── TeslaBLE.xcodeproj/
 └── TeslaBLE/
-    ├── TeslaBLEApp.swift      # App 入口
-    ├── Info.plist             # 权限（蓝牙）+ 后台模式
+    ├── TeslaBLEApp.swift
     ├── Models/
-    │   └── TelemetryModel.swift   # 数据模型 / 状态 / 命令
+    │   └── TelemetryModel.swift
     ├── Services/
-    │   ├── BLEService.swift       # 蓝牙核心服务（连接/加密/收发）
-    │   └── TeslaProtocol.swift    # 协议常量 / 密钥管理 / 加密 / 消息
+    │   ├── BLEService.swift
+    │   └── TeslaProtocol.swift
     ├── ViewModels/
     │   └── DashboardViewModel.swift
     └── Views/
@@ -183,15 +79,6 @@ TeslaBLE/
 ```
 
 ## 注意事项
-
-- 需要车辆支持 Phone Key（大多数 2021+ 车型）
-- 私钥安全存储在 iOS Keychain，丢失需重新配对
-- BLE 距离有限（通常几米到十几米），适合车库/家用本地场景
-- 老款车型（2021 年前的部分 S/X）可能不支持新协议
+- 需要车辆支持 Phone Key（2021+ 大部分车型）
+- 私钥安全存储在 iOS Keychain
 - 非官方实现可能因固件更新失效，使用风险自担
-
-## 参考资源
-
-- [Tesla Vehicle Command SDK](https://github.com/teslamotors/vehicle-command)
-- [TeslaBT API 非官方文档](https://www.teslabtapi.com)
-- [Tesla Protobufs](https://github.com/acvigue/TeslaProtobufs)

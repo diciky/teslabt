@@ -240,6 +240,36 @@ struct TeslaBLEKeyManager {
     static func resetKeys() {
         deleteFromKeychain(tag: privateKeyTag)
         deleteFromKeychain(tag: publicKeyTag)
+        deleteFromKeychain(tag: vinKeyTag)
+    }
+
+    // MARK: - VIN 存储
+
+    /// VIN 存储 Keychain Key
+    private static let vinKeyTag = "com.teslabt.vin"
+
+    /// 保存 VIN 到 Keychain
+    static func saveVIN(_ vin: String) {
+        saveToKeychain(tag: vinKeyTag, data: Data(vin.utf8))
+    }
+
+    /// 从 Keychain 读取已保存的 VIN
+    static func getSavedVIN() -> String? {
+        guard let data = loadFromKeychain(tag: vinKeyTag) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    // MARK: - 私钥导入
+
+    /// 导入 P-256 私钥到 Keychain
+    static func importPrivateKey(_ key: P256.Signing.PrivateKey) -> Bool {
+        let privateData = key.rawRepresentation
+        let publicData = key.publicKey.rawRepresentation
+        if saveToKeychain(tag: privateKeyTag, data: privateData),
+           saveToKeychain(tag: publicKeyTag, data: publicData) {
+            return true
+        }
+        return false
     }
 
     // MARK: - Keychain 辅助
@@ -662,6 +692,15 @@ extension TeslaProtocol {
         // InformationRequest: field1(informationRequestType)=0 → [0x08, 0x00]
         let infoReq = Data([0x08, 0x00])
         // UnsignedMessage: field1(InformationRequest 消息) → 0x0A 0x02 ...
+        return Data(TeslaProtobuf.encodeMessageField(1, infoReq))
+    }
+
+    /// 构建 VCSEC.UnsignedMessage 车辆信息请求
+    /// 用于获取车机固件版本等设备信息
+    static func buildVehicleInfoRequest() -> Data {
+        // InformationRequest: field1(informationRequestType)=1 (GET_VEHICLE_INFO) → [0x08, 0x01]
+        let infoReq = Data([0x08, 0x01])
+        // UnsignedMessage: field1(InformationRequest 消息)
         return Data(TeslaProtobuf.encodeMessageField(1, infoReq))
     }
 
