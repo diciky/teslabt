@@ -21,7 +21,7 @@ jobs:
         working-directory: XiaoZhiFlasher
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Show Xcode version
         run: |
@@ -30,7 +30,7 @@ jobs:
 
       - name: Build app (no signing for TrollStore)
         run: |
-          set -e
+          set +e
           xcodebuild \
             -project XiaoZhiFlasher.xcodeproj \
             -scheme XiaoZhiFlasher \
@@ -40,7 +40,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee /tmp/xcodebuild.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -ne 0 ]; then
+            echo "=== xcodebuild 失败 (exit $rc)，错误摘要 ==="
+            grep -E "error:|BUILD FAILED|Command .* failed|\.swift:[0-9]" /tmp/xcodebuild.log | tail -60
+            exit $rc
+          fi
+          set -e
 
       - name: Package tipa
         run: |
@@ -53,7 +60,7 @@ jobs:
           ls -lh XiaoZhiFlasher.tipa
 
       - name: Upload tipa artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: XiaoZhiFlasher-tipa
           path: XiaoZhiFlasher/build/Build/Products/**/XiaoZhiFlasher.tipa
