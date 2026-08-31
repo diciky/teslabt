@@ -9,7 +9,7 @@ name: Build XiaoZhiFlasher tipa
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, auto/xiaozhi-flasher-f104 ]
     paths:
       - 'XiaoZhiFlasher/**'
       - '.github/workflows/build-tipa.yml'
