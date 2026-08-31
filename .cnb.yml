@@ -1,6 +1,7 @@
 # XiaoZhiFlasher iOS tipa 构建流水线
 #
 # tipa 只能在 macOS + Xcode 上编译生成。通过 CNB 自托管 macOS Runner 执行。
+# TrollStore 直接安装 tipa 无需签名，构建时禁用代码签名。
 main:
   push:
     - name: build-tipa
@@ -25,7 +26,9 @@ main:
               -configuration Release \
               -sdk iphoneos \
               -derivedDataPath build \
-              -allowProvisioningUpdates \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
               build
         - name: make-tipa
           script: |
@@ -67,7 +70,9 @@ $:
               -configuration Release \
               -sdk iphoneos \
               -derivedDataPath build \
-              -allowProvisioningUpdates \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
               build
         - name: make-tipa
           script: |
