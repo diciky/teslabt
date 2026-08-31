@@ -83,17 +83,32 @@ jobs:
           grep -n "DEVELOPMENT_TEAM" TeslaBLE.xcodeproj/project.pbxproj
 
       - name: Build archive
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
         run: |
           set -e
-          xcodebuild \
-            -project TeslaBLE.xcodeproj \
-            -scheme TeslaBLE \
-            -configuration Release \
-            -sdk iphoneos \
-            -archivePath "$RUNNER_TEMP/TeslaBLE.xcarchive" \
-            -allowProvisioningUpdates \
-            CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}" \
-            archive
+          # 有 Team ID 时正常签名构建；无 Team ID 时禁用签名（未签名 ipa）
+          if [ -n "$DEVELOPMENT_TEAM" ]; then
+            xcodebuild \
+              -project TeslaBLE.xcodeproj \
+              -scheme TeslaBLE \
+              -configuration Release \
+              -sdk iphoneos \
+              -archivePath "$RUNNER_TEMP/TeslaBLE.xcarchive" \
+              -allowProvisioningUpdates \
+              archive
+          else
+            xcodebuild \
+              -project TeslaBLE.xcodeproj \
+              -scheme TeslaBLE \
+              -configuration Release \
+              -sdk iphoneos \
+              -archivePath "$RUNNER_TEMP/TeslaBLE.xcarchive" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              archive
+          fi
 
       - name: Export IPA
         env:
