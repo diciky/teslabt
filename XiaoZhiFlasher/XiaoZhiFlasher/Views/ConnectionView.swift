@@ -53,11 +53,31 @@ struct ConnectionView: View {
 
                 if vm.status.isConnected {
                     Section(header: Text("设备信息")) {
-                        LabeledContent("固件版本", value: vm.status.version ?? "—")
-                        LabeledContent("VIN", value: vm.status.vin ?? "未设置")
-                        LabeledContent("配对", value: vm.status.paired ? "是" : "否")
+                        HStack {
+                            Text("固件版本")
+                            Spacer()
+                            Text(vm.status.version ?? "—")
+                                .foregroundColor(.secondary)
+                        }
+                        HStack {
+                            Text("VIN")
+                            Spacer()
+                            Text(vm.status.vin ?? "未设置")
+                                .foregroundColor(.secondary)
+                        }
+                        HStack {
+                            Text("配对")
+                            Spacer()
+                            Text(vm.status.paired ? "是" : "否")
+                                .foregroundColor(.secondary)
+                        }
                         if let link = vm.status.linkState {
-                            LabeledContent("链路状态", value: "\(link)")
+                            HStack {
+                                Text("链路状态")
+                                Spacer()
+                                Text("\(link)")
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }

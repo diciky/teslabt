@@ -14,8 +14,18 @@ struct BackupView: View {
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
-                    LabeledContent("VIN", value: vm.status.vin ?? "未读取到")
-                    LabeledContent("配对", value: vm.status.paired ? "是" : "否")
+                    HStack {
+                        Text("VIN")
+                        Spacer()
+                        Text(vm.status.vin ?? "未读取到")
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text("配对")
+                        Spacer()
+                        Text(vm.status.paired ? "是" : "否")
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Section {

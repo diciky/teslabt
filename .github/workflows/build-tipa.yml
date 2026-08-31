@@ -1,10 +1,7 @@
 # XiaoZhiFlasher iOS tipa 构建（GitHub Actions）
 #
 # tipa 只能在 macOS + Xcode 上编译。这里用 GitHub 托管的 macOS 云构建机（macos-14）。
-# TrollStore 设备直接安装 .tipa，无需签名。
-#
-# 触发条件：推送到 main 分支（用户 GitHub 仓库 diciky/teslabt 的默认分支），
-# 或在 Actions 页面手动 Run workflow。
+# TrollStore 设备直接安装 .tipa，无需签名，因此构建时禁用代码签名。
 name: Build XiaoZhiFlasher tipa
 
 on:
@@ -31,7 +28,7 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks | grep -i ios
 
-      - name: Build app
+      - name: Build app (no signing for TrollStore)
         run: |
           set -e
           xcodebuild \
@@ -40,7 +37,9 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
-            -allowProvisioningUpdates \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             build
 
       - name: Package tipa
